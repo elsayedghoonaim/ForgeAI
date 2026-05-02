@@ -1,0 +1,93 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-forgeai
+  labels:
+    app: forgeai
+    chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+    release: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: forgeai
+      release: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: forgeai
+        release: {{ .Release.Name }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.server.port }}"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: forgeai
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["forgeai", "serve"]
+          args:
+            - "--host"
+            - "{{ .Values.server.host }}"
+            - "--port"
+            - "{{ .Values.server.port | toString }}"
+            - "--tp"
+            - "{{ .Values.gpu.tensorParallelSize | toString }}"
+            - "--gpu-util"
+            - "{{ .Values.gpu.memoryUtilization | toString }}"
+            {{- if .Values.auth.enabled }}
+            - "--auth"
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.server.port }}
+              protocol: TCP
+          env:
+            - name: forgeai_MODEL_NAME
+              value: {{ required "model.name must be set" .Values.model.name | quote }}
+            - name: forgeai_TELEMETRY_ENABLED
+              value: "{{ .Values.telemetry.enabled }}"
+            - name: HF_HOME
+              value: "/models"
+            {{- if .Values.auth.enabled }}
+            - name: forgeai_AUTH_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-auth-secret
+                  key: secret-key
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.liveness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readiness.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+          volumeMounts:
+            - name: model-cache
+              mountPath: /models
+      volumes:
+        {{- if .Values.persistence.enabled }}
+        - name: model-cache
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-model-cache
+        {{- else }}
+        - name: model-cache
+          emptyDir: {}
+        {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

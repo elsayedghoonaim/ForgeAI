@@ -1,0 +1,69 @@
+# vLLM DevTool Helm Chart — Default Values
+
+replicaCount: 1
+
+image:
+  repository: forgeai
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+model:
+  name: ""
+  cacheSize: "100Gi"
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 1
+  logLevel: "info"
+
+gpu:
+  enabled: true
+  count: 1
+  memoryUtilization: 0.90
+  tensorParallelSize: 1
+
+auth:
+  enabled: false
+  secretKey: "change-me-in-production"
+
+telemetry:
+  enabled: false
+
+resources:
+  requests:
+    cpu: "4"
+    memory: "16Gi"
+    nvidia.com/gpu: "1"
+  limits:
+    cpu: "8"
+    memory: "32Gi"
+    nvidia.com/gpu: "1"
+
+service:
+  type: ClusterIP
+  port: 8000
+
+probes:
+  liveness:
+    path: /healthz
+    initialDelaySeconds: 30
+    periodSeconds: 15
+  readiness:
+    path: /readyz
+    initialDelaySeconds: 60
+    periodSeconds: 10
+
+persistence:
+  enabled: true
+  storageClass: ""
+  size: "100Gi"
+  accessMode: ReadWriteOnce
+
+tolerations:
+  - key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+
+nodeSelector: {}
+affinity: {}
