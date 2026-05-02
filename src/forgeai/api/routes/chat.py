@@ -63,7 +63,7 @@ async def create_chat_completion(
         if not engine.supports_streaming:
             raise HTTPException(status_code=501, detail="Streaming not supported by this backend")
         from fastapi.responses import StreamingResponse
-        
+
         async def _stream_generator():
             prompt = engine.build_prompt([message.model_dump() for message in body.messages])
             request_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -84,7 +84,7 @@ async def create_chat_completion(
                 }
                 yield f"data: {json.dumps(payload)}\n\n"
             yield "data: [DONE]\n\n"
-            
+
         return StreamingResponse(_stream_generator(), media_type="text/event-stream")
 
     prompt = engine.build_prompt([message.model_dump() for message in body.messages])

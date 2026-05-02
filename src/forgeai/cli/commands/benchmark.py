@@ -65,13 +65,13 @@ def benchmark(
                 console.print(f"[green]OK[/green] Downloaded to {resolved}")
             except Exception as e:
                 console.print(f"[red]ERROR:[/red] Failed to download GGUF: {e}")
-                raise typer.Exit(code=1)
+                raise typer.Exit(code=1) from e
         else:
             console.print(f"\n[red]ERROR:[/red] Model \"{resolved}\" is not in GGUF format, and no GGUF variants were found.")
             console.print("\nThe llama_cpp backend requires GGUF models. Options:")
             console.print(f"  1. Use the vllm backend instead:\n     forgeai benchmark {resolved} --backend vllm")
             console.print("  2. Convert it manually to GGUF using llama.cpp scripts.")
-            raise typer.Exit(code=1)
+            raise typer.Exit(code=1) from None
 
     settings = DevToolSettings(
         model_name=resolved,

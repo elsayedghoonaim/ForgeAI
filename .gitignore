@@ -12,3 +12,14 @@ build/
 dist/
 .coverage
 htmlcov/
+
+# Legacy files kept locally for reference
+Plan.txt
+testing_guide.md
+requirements/
+
+# SDK placeholder (not yet implemented)
+sdk/
+
+# Old Helm charts (not yet updated for ForgeAI)
+helm/

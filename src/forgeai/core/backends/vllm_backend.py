@@ -7,7 +7,6 @@ import importlib
 import math
 import os
 import tempfile
-import time
 import warnings
 from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
@@ -17,10 +16,10 @@ from uuid import uuid4
 
 from rich.console import Console
 
+from forgeai.core.backends.base import BaseBackend, GenerationResult
 from forgeai.core.config import BackendType, DevToolSettings
 from forgeai.core.security import check_vllm_version
 from forgeai.utils.gpu import GPU_MEMORY_STARTUP_RESERVE_MB
-from forgeai.core.backends.base import BaseBackend, GenerationResult
 
 console = Console()
 

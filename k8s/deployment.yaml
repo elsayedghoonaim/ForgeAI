@@ -29,9 +29,9 @@ spec:
               name: http
               protocol: TCP
           env:
-            - name: forgeai_MODEL_NAME
+            - name: FORGEAI_MODEL_NAME
               value: "Qwen/Qwen2.5-7B-Instruct"
-            - name: forgeai_TELEMETRY_ENABLED
+            - name: FORGEAI_TELEMETRY_ENABLED
               value: "false"
             - name: HF_HOME
               value: "/models"
@@ -66,7 +66,7 @@ spec:
       volumes:
         - name: model-cache
           persistentVolumeClaim:
-            claimName: vllm-model-cache
+            claimName: forgeai-model-cache
       tolerations:
         - key: nvidia.com/gpu
           operator: Exists
@@ -91,7 +91,7 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: vllm-model-cache
+  name: forgeai-model-cache
 spec:
   accessModes:
     - ReadWriteOnce

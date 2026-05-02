@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import AsyncIterator, Any
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 from forgeai.core.config import DevToolSettings

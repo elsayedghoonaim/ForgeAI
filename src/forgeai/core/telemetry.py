@@ -7,7 +7,7 @@ Collects ZERO prompts or output data. Only tracks:
 - Backend types (vllm vs llama.cpp)
 - Error types (not content)
 
-Disabled by default. Enable via forgeai_TELEMETRY_ENABLED=true.
+Disabled by default. Enable via FORGEAI_TELEMETRY_ENABLED=true.
 """
 
 from __future__ import annotations
@@ -92,7 +92,7 @@ class TelemetryCollector:
 
 # Global telemetry instance — disabled by default
 _telemetry = TelemetryCollector(
-    enabled=os.environ.get("forgeai_TELEMETRY_ENABLED", "false").lower() == "true"
+    enabled=os.environ.get("FORGEAI_TELEMETRY_ENABLED", "false").lower() == "true"
 )
 
 

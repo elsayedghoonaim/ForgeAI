@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from collections.abc import AsyncIterator
 from typing import Any
 
 from rich.console import Console
 
-from forgeai.core.config import BackendType, DevToolSettings
 from forgeai.core.backends.base import BaseBackend, GenerationResult
+from forgeai.core.config import BackendType, DevToolSettings
 
 console = Console()
 
@@ -49,10 +48,10 @@ class LlamaCppBackend(BaseBackend):
         kwargs = self.settings.to_llamacpp_kwargs()
         if not self._quiet_startup:
             console.print(f"[dim]Initializing llama.cpp engine with: {kwargs}[/dim]")
-        
+
         self._engine = Llama(**kwargs)
         self._is_running = True
-        
+
         if not self._quiet_startup:
             console.print(
                 f"[green]OK[/green] Engine initialized: "
@@ -101,7 +100,7 @@ class LlamaCppBackend(BaseBackend):
             top_p=top_p,
             stop=stop,
         )
-        
+
         return self._request_output_to_result(output)
 
     async def generate_stream(
@@ -125,7 +124,7 @@ class LlamaCppBackend(BaseBackend):
             stop=stop,
             stream=True,
         )
-        
+
         for chunk in generator:
             text = chunk["choices"][0]["text"]
             if text:
@@ -138,16 +137,16 @@ class LlamaCppBackend(BaseBackend):
         choices = output.get("choices", [])
         if not choices:
             return GenerationResult(text="")
-            
+
         choice = choices[0]
         text = choice.get("text", "")
         finish_reason = choice.get("finish_reason", "stop")
-        
+
         usage = output.get("usage", {})
         prompt_tokens = usage.get("prompt_tokens", 0)
         completion_tokens = usage.get("completion_tokens", 0)
         total_tokens = usage.get("total_tokens", 0)
-        
+
         return GenerationResult(
             text=text,
             prompt_tokens=prompt_tokens,

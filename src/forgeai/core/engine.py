@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 import time
 from collections.abc import AsyncIterator
-from contextlib import contextmanager
 from typing import Any
 
 from rich.console import Console
 
+from forgeai.core.backends.base import BaseBackend, EngineStatus, GenerationResult
 from forgeai.core.config import DevToolSettings
-from forgeai.core.backends.base import BaseBackend, GenerationResult, EngineStatus
 
 console = Console()
 
@@ -54,10 +52,10 @@ class DevToolEngine:
     def initialize(self) -> None:
         """Initialize the configured backend."""
         from forgeai.core.backends.factory import create_backend
-        
+
         self._backend = create_backend(
-            self.settings, 
-            streaming=self._streaming_enabled, 
+            self.settings,
+            streaming=self._streaming_enabled,
             quiet_startup=self._quiet_startup
         )
         self._backend.initialize()
@@ -119,7 +117,7 @@ class DevToolEngine:
             # We don't have accurate token counts per chunk from all backends
             # in a unified way here, so we approximate or leave them at 0
             # Backend might update these inside GenerationResult later
-            completion_tokens += 1 
+            completion_tokens += 1
             yield chunk
 
         elapsed = time.time() - start
