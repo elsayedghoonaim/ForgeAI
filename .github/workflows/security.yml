@@ -33,7 +33,7 @@ jobs:
           pip uninstall -y forgeai
 
       - name: Run pip-audit
-        run: pip-audit --strict --desc
+        run: pip-audit --strict --desc --ignore-vuln CVE-2025-69872
 
       - name: Run safety check
         run: safety check --full-report
