@@ -30,6 +30,7 @@ jobs:
           pip install --upgrade pip
           pip install pip-audit safety
           pip install ".[all]"
+          pip uninstall -y forgeai
 
       - name: Run pip-audit
         run: pip-audit --strict --desc
