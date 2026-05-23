@@ -14,5 +14,7 @@
   - [x] Create `tests/test_api_compliance.py` covering templates, API models, and stream formats
   - [x] Assert all tests pass perfectly
 - [x] Mitigate Dependency Resolution Loop
-  - [x] Identify `resolution-too-deep` conflict between `starlette>=1.0.1` and old `fastapi` lower bounds
-  - [x] Constrain `fastapi>=0.133.0` in both `pyproject.toml` and `requirements/base.txt` to align with Starlette 1.x support
+  - [x] Identify `resolution-too-deep` conflict caused by manual sub-dependency pins (`starlette` and `uvicorn`) conflicting with the vLLM and FastAPI engine ecosystem requirements
+  - [x] Remove the manual `starlette` pin and relax `fastapi>=0.115.0` and `uvicorn>=0.30.0` bounds to ensure mathematical compatibility across the full vLLM/FastAPI dependency tree
+- [x] Resolve Jinja2 Test Failures
+  - [x] Address `ImportError` on `jinja2` in lightweight/bare test environments by adding `jinja2` to core dependencies in `pyproject.toml` and `requirements/base.txt`

@@ -106,7 +106,6 @@ class LlamaCppBackend(BaseBackend):
                         return rendered
                 except Exception:
                     pass
-
         # 2. Dynamic high-fidelity fallbacks based on model name or model path
         model_identifier = ""
         if self.settings.model_name:
