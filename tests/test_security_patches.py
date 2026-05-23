@@ -80,7 +80,7 @@ class SecurityVllmVersionTests(unittest.TestCase):
         from types import ModuleType
         mock_vllm = ModuleType("vllm")
         mock_vllm.__version__ = "0.13.9"
-        
+
         with patch.dict(sys.modules, {"vllm": mock_vllm}):
             with self.assertRaises(RuntimeError) as ctx:
                 check_vllm_version(min_version="0.14.0", announce_success=False)
@@ -91,7 +91,7 @@ class SecurityVllmVersionTests(unittest.TestCase):
         from types import ModuleType
         mock_vllm = ModuleType("vllm")
         mock_vllm.__version__ = "0.14.0"
-        
+
         with patch.dict(sys.modules, {"vllm": mock_vllm}):
             self.assertTrue(check_vllm_version(min_version="0.14.0", announce_success=False))
 
@@ -101,7 +101,7 @@ class SecurityVllmVersionTests(unittest.TestCase):
         mock_vllm = ModuleType("vllm")
         # 0.14.0rc1 is below 0.14.0
         mock_vllm.__version__ = "0.14.0rc1"
-        
+
         with patch.dict(sys.modules, {"vllm": mock_vllm}):
             with self.assertRaises(RuntimeError) as ctx:
                 check_vllm_version(min_version="0.14.0", announce_success=False)
@@ -113,7 +113,7 @@ class SecurityVllmVersionTests(unittest.TestCase):
         mock_vllm = ModuleType("vllm")
         # 0.14.1rc1 is above 0.14.0
         mock_vllm.__version__ = "0.14.1rc1"
-        
+
         with patch.dict(sys.modules, {"vllm": mock_vllm}):
             self.assertTrue(check_vllm_version(min_version="0.14.0", announce_success=False))
 
@@ -122,7 +122,7 @@ class SecurityVllmVersionTests(unittest.TestCase):
         from types import ModuleType
         mock_vllm = ModuleType("vllm")
         mock_vllm.__version__ = "0.15.0"
-        
+
         with patch.dict(sys.modules, {"vllm": mock_vllm}):
             self.assertTrue(check_vllm_version(min_version="0.14.0", announce_success=False))
 
@@ -131,7 +131,7 @@ class SecurityVllmVersionTests(unittest.TestCase):
         from types import ModuleType
         mock_vllm = ModuleType("vllm")
         mock_vllm.__version__ = "not-a-valid-version-string"
-        
+
         with patch.dict(sys.modules, {"vllm": mock_vllm}):
             with self.assertRaises(RuntimeError) as ctx:
                 check_vllm_version(min_version="0.14.0", announce_success=False)
@@ -185,22 +185,22 @@ class SecurityRepoIdTests(unittest.TestCase):
         # Create a temp dir to act as the download location
         temp_download_dir = tempfile.TemporaryDirectory()
         download_path = Path(temp_download_dir.name).resolve()
-        
+
         # Write a malicious weight file inside the download location
         class Malicious:
             def __reduce__(self):
                 import os
                 return (os.system, ("echo unsafe",))
-                
+
         unsafe_stream = pickle.dumps(Malicious(), protocol=4)
         file_path = download_path / "model.bin"
         with zipfile.ZipFile(file_path, "w") as z:
             z.writestr("archive/data.pkl", unsafe_stream)
-            
+
         mock_snapshot_download.return_value = str(download_path)
         mock_hf = MagicMock()
         mock_hf.snapshot_download.return_value = str(download_path)
-        
+
         try:
             with patch.dict(sys.modules, {"huggingface_hub": mock_hf}):
                 # Call download_model, it should download, scan, fail and raise ValueError
@@ -211,7 +211,7 @@ class SecurityRepoIdTests(unittest.TestCase):
                         enable_safety_scan=True
                     )
                 self.assertIn("SECURITY BLOCK: Model safety scan failed", str(ctx.exception))
-                
+
                 # Check that the download directory was deleted/cleaned up
                 self.assertFalse(download_path.exists())
         finally:
@@ -255,13 +255,13 @@ class SecuritySafetyScannerTests(unittest.TestCase):
     def test_scan_pytorch_format_warning_and_safe_pickle(self) -> None:
         # Test safe zip pickle
         safe_stream = pickle.dumps({"weights": [1.0, 2.0]})
-        
+
         file_path = self.dir_path / "model.bin"
         with zipfile.ZipFile(file_path, "w") as z:
             z.writestr("archive/data.pkl", safe_stream)
-            
+
         result = scan_model_weights(str(file_path))
-        
+
         self.assertTrue(result["safe"])
         self.assertTrue(any("Insecure PyTorch format" in w for w in result["warnings"]))
         self.assertFalse(any("Unsafe pickle" in w for w in result["warnings"]))
@@ -274,13 +274,13 @@ class SecuritySafetyScannerTests(unittest.TestCase):
                 return (os.system, ("echo unsafe",))
 
         unsafe_stream = pickle.dumps(Malicious(), protocol=0)
-        
+
         file_path = self.dir_path / "model.bin"
         with zipfile.ZipFile(file_path, "w") as z:
             z.writestr("archive/data.pkl", unsafe_stream)
-            
+
         result = scan_model_weights(str(file_path))
-        
+
         self.assertFalse(result["safe"])
         self.assertTrue(any("Insecure PyTorch format" in w for w in result["warnings"]))
         self.assertTrue(any("Unsafe pickle global" in w for w in result["warnings"]))
@@ -294,13 +294,13 @@ class SecuritySafetyScannerTests(unittest.TestCase):
                 return (os.system, ("echo unsafe",))
 
         unsafe_stream = pickle.dumps(Malicious(), protocol=4)
-        
+
         file_path = self.dir_path / "model_proto4.bin"
         with zipfile.ZipFile(file_path, "w") as z:
             z.writestr("archive/data.pkl", unsafe_stream)
-            
+
         result = scan_model_weights(str(file_path))
-        
+
         self.assertFalse(result["safe"])
         self.assertTrue(any("Unsafe pickle global" in w for w in result["warnings"]))
         self.assertTrue(any("os.system" in w for w in result["warnings"]))

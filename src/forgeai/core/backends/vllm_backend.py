@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import importlib
 import math
 import os
@@ -414,10 +415,10 @@ class VLLMBackend(BaseBackend):
             if ray.is_initialized():
                 ray.shutdown()
         with contextlib.suppress(Exception):
-            import gc
+            gc.collect()
+        with contextlib.suppress(Exception):
             import torch
 
-            gc.collect()
             torch.cuda.empty_cache()
         self._is_running = False
         console.print("[yellow]vLLM Engine shut down.[/yellow]")

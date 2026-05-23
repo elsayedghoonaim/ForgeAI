@@ -167,7 +167,7 @@ def _scan_pickle_bytes(data: Any, file_name: str) -> list[str]:
         "load", "loads", "__import__", "getattr", "setattr", "delattr",
         "globals", "locals", "reduce"
     }
-    
+
     stack: list[str] = []
     try:
         for opcode, arg, _pos in pickletools.genops(data):
