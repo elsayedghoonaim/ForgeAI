@@ -19,7 +19,7 @@ def _required_permission(method: str, path: str) -> str:
         return "inference"
     if method == "GET" and path.startswith("/v1/models"):
         return "models"
-    
+
     # Fail-closed default: require top administrative privileges for any unrecognized path
     return "admin"
 

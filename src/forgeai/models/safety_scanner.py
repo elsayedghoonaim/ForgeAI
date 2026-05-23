@@ -7,8 +7,8 @@ backdoor attacks, trojan insertions, or corrupted parameters.
 
 from __future__ import annotations
 
-import zipfile
 import pickletools
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -170,7 +170,7 @@ def _scan_pickle_bytes(data: Any, file_name: str) -> list[str]:
     
     stack: list[str] = []
     try:
-        for opcode, arg, pos in pickletools.genops(data):
+        for opcode, arg, _pos in pickletools.genops(data):
             if opcode.name in ("SHORT_BINUNICODE", "BINUNICODE", "UNICODE", "STRING"):
                 stack.append(arg)
             elif opcode.name in ("BINBYTES", "SHORT_BINBYTES"):
@@ -190,7 +190,7 @@ def _scan_pickle_bytes(data: Any, file_name: str) -> list[str]:
                     module, name = arg
                 else:
                     continue
-                
+
                 # Check against blocklists
                 if module in dangerous_modules or any(dm in module.split(".") for dm in dangerous_modules):
                     display_module = "os" if module in ("posix", "nt") else module
@@ -202,26 +202,25 @@ def _scan_pickle_bytes(data: Any, file_name: str) -> list[str]:
                     warnings.append(
                         f"Unsafe pickle function detected in {file_name}: '{display_module}.{name}'"
                     )
-            elif opcode.name == "STACK_GLOBAL":
-                if len(stack) >= 2:
-                    name = stack[-1]
-                    module = stack[-2]
-                    # Pop them off
-                    stack.pop()
-                    stack.pop()
-                    
-                    if isinstance(module, str) and isinstance(name, str):
-                        if module in dangerous_modules or any(dm in module.split(".") for dm in dangerous_modules):
-                            display_module = "os" if module in ("posix", "nt") else module
-                            warnings.append(
-                                f"Unsafe pickle global detected in {file_name}: '{display_module}.{name}'"
-                            )
-                        elif name in dangerous_functions:
-                            display_module = "os" if module in ("posix", "nt") else module
-                            warnings.append(
-                                f"Unsafe pickle function detected in {file_name}: '{display_module}.{name}'"
-                            )
-    except Exception as e:
+            elif opcode.name == "STACK_GLOBAL" and len(stack) >= 2:
+                name = stack[-1]
+                module = stack[-2]
+                # Pop them off
+                stack.pop()
+                stack.pop()
+
+                if isinstance(module, str) and isinstance(name, str):
+                    if module in dangerous_modules or any(dm in module.split(".") for dm in dangerous_modules):
+                        display_module = "os" if module in ("posix", "nt") else module
+                        warnings.append(
+                            f"Unsafe pickle global detected in {file_name}: '{display_module}.{name}'"
+                        )
+                    elif name in dangerous_functions:
+                        display_module = "os" if module in ("posix", "nt") else module
+                        warnings.append(
+                            f"Unsafe pickle function detected in {file_name}: '{display_module}.{name}'"
+                        )
+    except Exception:
         pass
     return warnings
 
@@ -233,7 +232,7 @@ def _scan_pytorch(file_path: Path, result: ScanResult) -> None:
         f"Insecure PyTorch format (.bin/.pt/.pth) detected in {file_path.name}. "
         f"We recommend converting to safetensors for safer and faster loading."
     )
-    
+
     try:
         file_size = file_path.stat().st_size
         if file_size < 100:  # Suspiciously small

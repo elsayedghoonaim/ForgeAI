@@ -67,10 +67,10 @@ class LlamaCppBackend(BaseBackend):
             if chat_template:
                 if isinstance(chat_template, bytes):
                     chat_template = chat_template.decode("utf-8", errors="ignore")
-                
+
                 try:
                     import jinja2
-                    
+
                     # Extract native BOS and EOS tokens from the engine
                     bos_token = "<s>"
                     if hasattr(self._engine, "token_bos"):
@@ -80,7 +80,7 @@ class LlamaCppBackend(BaseBackend):
                                 bos_token = bos_bytes.decode("utf-8", errors="ignore")
                         except Exception:
                             pass
-                            
+
                     eos_token = "</s>"
                     if hasattr(self._engine, "token_eos"):
                         try:
@@ -95,7 +95,7 @@ class LlamaCppBackend(BaseBackend):
                     # HF chat templates sometimes use custom filters or raise_exception function.
                     env.globals["raise_exception"] = lambda msg: msg
                     template = env.from_string(chat_template)
-                    
+
                     rendered = template.render(
                         messages=messages,
                         bos_token=bos_token,
@@ -142,7 +142,7 @@ class LlamaCppBackend(BaseBackend):
                 if message.get("role") == "system":
                     system_msg = message.get("content", "")
                     break
-            
+
             prompt = ""
             first_user = True
             for message in messages:
@@ -286,10 +286,9 @@ class LlamaCppBackend(BaseBackend):
         """Gracefully shut down the engine."""
         if self._engine is not None:
             if hasattr(self._engine, "close"):
-                try:
+                import contextlib
+                with contextlib.suppress(Exception):
                     self._engine.close()
-                except Exception:
-                    pass
             self._engine = None
         self._is_running = False
         console.print("[yellow]llama.cpp Engine shut down.[/yellow]")

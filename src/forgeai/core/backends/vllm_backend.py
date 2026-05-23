@@ -402,27 +402,23 @@ class VLLMBackend(BaseBackend):
 
     def shutdown(self) -> None:
         """Gracefully shut down the engine."""
+        import contextlib
         if self._engine is not None:
             if hasattr(self._engine, "shutdown"):
-                try:
+                with contextlib.suppress(Exception):
                     self._engine.shutdown()
-                except Exception:
-                    pass
             self._engine = None
             self._tokenizer = None
-        try:
+        with contextlib.suppress(Exception):
             import ray
             if ray.is_initialized():
                 ray.shutdown()
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             import gc
             import torch
+
             gc.collect()
             torch.cuda.empty_cache()
-        except Exception:
-            pass
         self._is_running = False
         console.print("[yellow]vLLM Engine shut down.[/yellow]")
 

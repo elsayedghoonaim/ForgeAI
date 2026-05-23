@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
 
 import httpx
 
@@ -70,17 +68,17 @@ class ApiComplianceTests(unittest.IsolatedAsyncioTestCase):
         """Verify that LlamaCppBackend renders Jinja templates correctly when present in metadata."""
         settings = DevToolSettings(model_name="custom-model")
         backend = LlamaCppBackend(settings)
-        
+
         # Set up engine with metadata Jinja template
         jinja_template = "{% for msg in messages %}<|role|>-{{ msg.role }}\n<|content|>-{{ msg.content }}\n{% endfor %}"
         mock_engine = MockLlamaEngine(metadata={"tokenizer.chat_template": jinja_template})
         backend._engine = mock_engine
-        
+
         messages = [
             {"role": "system", "content": "You are a test helper."},
             {"role": "user", "content": "Hello!"}
         ]
-        
+
         prompt = backend.build_prompt(messages)
         expected = "<|role|>-system\n<|content|>-You are a test helper.\n<|role|>-user\n<|content|>-Hello!\n"
         self.assertEqual(prompt, expected)
@@ -89,12 +87,12 @@ class ApiComplianceTests(unittest.IsolatedAsyncioTestCase):
         """Verify that LlamaCppBackend passes detokenized bos_token and eos_token to Jinja rendering."""
         settings = DevToolSettings(model_name="custom-model")
         backend = LlamaCppBackend(settings)
-        
+
         # Template using bos/eos
         jinja_template = "{{ bos_token }}{% for msg in messages %}{{ msg.content }}{% endfor %}{{ eos_token }}"
         mock_engine = MockLlamaEngine(metadata={"tokenizer.chat_template": jinja_template})
         backend._engine = mock_engine
-        
+
         messages = [{"role": "user", "content": "content"}]
         prompt = backend.build_prompt(messages)
         self.assertEqual(prompt, "<s>content</s>")
@@ -104,7 +102,7 @@ class ApiComplianceTests(unittest.IsolatedAsyncioTestCase):
         settings = DevToolSettings(model_name="Meta-Llama-3-8B-Instruct.Q4_K_M.gguf")
         backend = LlamaCppBackend(settings)
         backend._engine = None  # No engine, forcing fallback
-        
+
         messages = [
             {"role": "system", "content": "Sys prompt"},
             {"role": "user", "content": "Hello"}
@@ -120,7 +118,7 @@ class ApiComplianceTests(unittest.IsolatedAsyncioTestCase):
         settings = DevToolSettings(model_name="qwen2-7b-instruct.gguf")
         backend = LlamaCppBackend(settings)
         backend._engine = None
-        
+
         messages = [
             {"role": "user", "content": "Hello"}
         ]
@@ -132,7 +130,7 @@ class ApiComplianceTests(unittest.IsolatedAsyncioTestCase):
         settings = DevToolSettings(model_name="mistral-7b-instruct-v0.2.Q4_K_M.gguf")
         backend = LlamaCppBackend(settings)
         backend._engine = None
-        
+
         messages = [
             {"role": "system", "content": "Sys"},
             {"role": "user", "content": "Hello"},
@@ -146,7 +144,7 @@ class ApiComplianceTests(unittest.IsolatedAsyncioTestCase):
         """Assert FastAPI routes conform to standard OpenAI specifications for streaming completions."""
         engine = FakeStreamingEngine()
         app = create_app(engine=engine)
-        
+
         async with self.async_client(app) as client:
             response = await client.post(
                 "/v1/chat/completions",
@@ -156,25 +154,25 @@ class ApiComplianceTests(unittest.IsolatedAsyncioTestCase):
                     "stream": True
                 }
             )
-            
+
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.headers["content-type"], "text/event-stream; charset=utf-8")
-            
+
             lines = [line.strip() for line in response.text.split("\n") if line.strip()]
             self.assertTrue(len(lines) >= 3)
-            
+
             # Verify SSE event format (data: json)
             first_chunk = lines[0]
             self.assertTrue(first_chunk.startswith("data: "))
             data_json = json.loads(first_chunk[6:])
             self.assertEqual(data_json["object"], "chat.completion.chunk")
             self.assertEqual(data_json["choices"][0]["delta"]["content"], "hello")
-            
+
             second_chunk = lines[1]
             self.assertTrue(second_chunk.startswith("data: "))
             data_json_2 = json.loads(second_chunk[6:])
             self.assertEqual(data_json_2["choices"][0]["delta"]["content"], " world")
-            
+
             # Verify termination chunk
             termination = lines[-1]
             self.assertEqual(termination, "data: [DONE]")

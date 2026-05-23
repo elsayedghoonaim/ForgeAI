@@ -25,21 +25,18 @@ def _is_valid_repo_id(repo_id: str) -> bool:
     """
     if not repo_id or len(repo_id) > 200:
         return False
-    
+
     parts = repo_id.split("/")
     if len(parts) > 2:
         return False
-        
+
     # Match alphanumeric, hyphen, underscore, and dot. Must not start/end with separators.
     part_pattern = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$")
     for part in parts:
         if not part_pattern.match(part):
             return False
-            
-    if ".." in repo_id or "//" in repo_id:
-        return False
-        
-    return True
+
+    return not (".." in repo_id or "//" in repo_id)
 
 
 def download_model(
@@ -118,7 +115,7 @@ def download_model(
                         os.remove(local_path)
                 except Exception:
                     pass
-                
+
                 raise ValueError(
                     f"SECURITY BLOCK: Model safety scan failed for {repo_id}. "
                     f"Reason: {scan_result.get('reason', 'Unknown')}"

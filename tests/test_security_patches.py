@@ -1,20 +1,26 @@
 from __future__ import annotations
 
-import io
-import os
-import sys
 import pickle
-import zipfile
+import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 # Ensure the src folder is on Python path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from forgeai.core.security import sanitize_path, check_vllm_version, validate_parallelism
-from forgeai.models.loader import _is_valid_repo_id, download_model, delete_cached_model
+from forgeai.core.security import (
+    check_vllm_version,
+    sanitize_path,
+    validate_parallelism,
+)
+from forgeai.models.loader import (
+    _is_valid_repo_id,
+    delete_cached_model,
+    download_model,
+)
 from forgeai.models.safety_scanner import scan_model_weights
 
 
@@ -318,32 +324,32 @@ class AuditLoggerVerifyChainTests(unittest.TestCase):
 
     def test_audit_logger_chain_tamper_detection(self) -> None:
         from forgeai.security.compliance.audit_logger import AuditLogger
-        
+
         logger = AuditLogger(log_dir=str(self.log_dir))
         logger.log("access", "admin", "POST", "/v1/chat/completions", outcome="success")
         logger.log("access", "admin", "GET", "/metrics", outcome="success")
-        
+
         log_files = sorted(self.log_dir.glob("audit_*.jsonl"))
         self.assertEqual(len(log_files), 1)
         log_file = log_files[0]
-        
+
         # 1. Verification of untampered log file passes
         ok, count = logger.verify_chain(str(log_file))
         self.assertTrue(ok)
         self.assertEqual(count, 2)
-        
+
         # 2. Tampering a record payload (e.g. changing outcome to Success) causes verification failure
-        with open(log_file, "r", encoding="utf-8") as f:
+        with open(log_file, encoding="utf-8") as f:
             lines = f.readlines()
-            
+
         import json
         entry = json.loads(lines[0].strip())
         entry["outcome"] = "tampered_success"  # Modify value without changing stored hash
-        
+
         lines[0] = json.dumps(entry) + "\n"
         with open(log_file, "w", encoding="utf-8") as f:
             f.writelines(lines)
-            
+
         # Chain verification must now fail
         ok, count = logger.verify_chain(str(log_file))
         self.assertFalse(ok)

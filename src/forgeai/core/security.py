@@ -9,10 +9,9 @@ Runtime security enforcement.
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
-from packaging.version import Version, InvalidVersion
 
+from packaging.version import InvalidVersion, Version
 from rich.console import Console
 
 console = Console()
@@ -103,12 +102,12 @@ def sanitize_path(path: str | Path, allowed_base: str | Path | None = None) -> P
                     f"  Path:    {resolved}\n"
                     f"  Allowed: {base}"
                 )
-        except ValueError:
+        except ValueError as err:
             raise ValueError(
                 f"Path escapes allowed directory.\n"
                 f"  Path:    {resolved}\n"
                 f"  Allowed: {base}"
-            )
+            ) from err
     else:
         # Enforce relative-only paths and block absolute traversal attempts when allowed_base is None
         if Path(path).is_absolute():

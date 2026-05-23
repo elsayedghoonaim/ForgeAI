@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 import unittest
 from inspect import iscoroutinefunction
@@ -11,17 +10,16 @@ from unittest.mock import MagicMock, patch
 # Ensure the src folder is on Python path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from forgeai.core.backends.base import BaseBackend, GenerationResult
-from forgeai.core.backends.vllm_backend import VLLMBackend
-from forgeai.core.backends.llamacpp_backend import LlamaCppBackend
-from forgeai.core.engine import DevToolEngine
-from forgeai.core.config import DevToolSettings
 from forgeai.cli.runtime import (
-    resolve_runtime_tuning,
-    recommend_chat_max_num_seqs,
     recommend_chat_max_model_len,
+    recommend_chat_max_num_seqs,
     recommend_run_max_model_len,
 )
+from forgeai.core.backends.base import BaseBackend, GenerationResult
+from forgeai.core.backends.llamacpp_backend import LlamaCppBackend
+from forgeai.core.backends.vllm_backend import VLLMBackend
+from forgeai.core.config import DevToolSettings
+from forgeai.core.engine import DevToolEngine
 from forgeai.utils.gpu import GPUInfo, GPUTopology
 
 
