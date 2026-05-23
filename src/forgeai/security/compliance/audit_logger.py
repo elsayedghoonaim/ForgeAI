@@ -77,7 +77,7 @@ class AuditLogger:
             return entry
 
     def verify_chain(self, log_file: str) -> tuple[bool, int]:
-        """Verify the integrity of an audit log file."""
+        """Verify the integrity of an audit log file and its cryptographic hash chain."""
 
         path = Path(log_file)
         if not path.exists():
@@ -89,13 +89,27 @@ class AuditLogger:
         with open(path, encoding="utf-8") as handle:
             for line in handle:
                 entry = self._parse_entry(line.strip())
+                
+                # 1. Verify continuity of the cryptographic chain
                 if entry.get("previous_hash") != prev_hash:
                     return False, count
-                entry_hash = entry.get("hash")
-                prev_hash = entry_hash if isinstance(entry_hash, str) else ""
+                
+                # 2. Extract and verify stored signature against content digest
+                stored_hash = entry.pop("hash", None)
+                if not stored_hash:
+                    return False, count
+                
+                recalc_str = json.dumps(entry, sort_keys=True)
+                recalculated_hash = hashlib.sha256(recalc_str.encode()).hexdigest()
+                
+                if recalculated_hash != stored_hash:
+                    return False, count
+                
+                prev_hash = stored_hash
                 count += 1
 
         return True, count
+
 
     def query(
         self,

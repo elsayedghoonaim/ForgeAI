@@ -57,7 +57,7 @@ class BaseBackend(ABC):
         pass
 
     @abstractmethod
-    def generate(
+    async def generate(
         self,
         prompt: str,
         max_tokens: int | None = None,
@@ -65,7 +65,7 @@ class BaseBackend(ABC):
         top_p: float = 0.95,
         stop: list[str] | None = None,
     ) -> GenerationResult:
-        """Run a single synchronous generation."""
+        """Run a single asynchronous generation."""
         pass
 
     @abstractmethod

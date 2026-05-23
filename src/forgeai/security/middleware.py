@@ -11,14 +11,18 @@ from starlette.responses import JSONResponse
 PUBLIC_PATHS = {"/healthz", "/readyz", "/docs", "/redoc", "/openapi.json"}
 
 
-def _required_permission(method: str, path: str) -> str | None:
+def _required_permission(method: str, path: str) -> str:
+    """Map paths to required permissions. Defaults to 'admin' (fail-closed)."""
     if path == "/metrics":
         return "monitoring"
     if method == "POST" and path == "/v1/chat/completions":
         return "inference"
     if method == "GET" and path.startswith("/v1/models"):
         return "models"
-    return None
+    
+    # Fail-closed default: require top administrative privileges for any unrecognized path
+    return "admin"
+
 
 
 def _request_id(request: Request) -> tuple[str, str]:

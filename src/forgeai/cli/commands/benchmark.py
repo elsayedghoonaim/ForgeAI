@@ -7,6 +7,7 @@ for management to justify compute purchases.
 
 from __future__ import annotations
 
+import asyncio
 import statistics
 
 import typer
@@ -94,7 +95,7 @@ def benchmark(
     if warmup > 0:
         console.print(f"[dim]Warming up ({warmup} iterations)...[/dim]")
         for _ in range(warmup):
-            engine.generate(prompts[0], max_tokens=max_tokens, temperature=0.0)
+            asyncio.run(engine.generate(prompts[0], max_tokens=max_tokens, temperature=0.0))
 
     # Benchmark
     latencies = []
@@ -105,7 +106,7 @@ def benchmark(
     try:
         console.print("[dim]Running benchmark...[/dim]\n")
         for i, p in enumerate(prompts):
-            result = engine.generate(p, max_tokens=max_tokens, temperature=0.0)
+            result = asyncio.run(engine.generate(p, max_tokens=max_tokens, temperature=0.0))
             latencies.append(result.elapsed_seconds)
             if result.elapsed_seconds > 0:
                 token_rates.append(result.completion_tokens / result.elapsed_seconds)

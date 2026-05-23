@@ -69,6 +69,7 @@ def serve(
         tensor_parallel_size=tensor_parallel,
         gpu_memory_utilization=gpu_utilization,
         auto_optimize=auto_optimize,
+        model_name=resolved,
     )
     print_runtime_tuning(tuning)
 

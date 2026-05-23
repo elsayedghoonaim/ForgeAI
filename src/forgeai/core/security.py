@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
+from packaging.version import Version, InvalidVersion
 
 from rich.console import Console
 
@@ -20,10 +21,9 @@ console = Console()
 MIN_VLLM_VERSION = "0.14.0"
 
 
-def _parse_version(version_str: str) -> tuple[int, ...]:
-    """Parse a version string into a tuple of integers."""
-    parts = re.findall(r"\d+", version_str)
-    return tuple(int(p) for p in parts)
+def _parse_version(version_str: str) -> Version:
+    """Parse a version string into a Version object."""
+    return Version(version_str)
 
 
 def check_vllm_version(
@@ -50,7 +50,16 @@ def check_vllm_version(
                 f"Minimum required: {min_version} (CVE-2026-22807)"
             )
 
-        if _parse_version(installed) < _parse_version(min_version):
+        try:
+            installed_ver = _parse_version(installed)
+            min_ver = _parse_version(min_version)
+        except InvalidVersion as ev:
+            raise RuntimeError(
+                f"Invalid vLLM version string format: {installed!r}. "
+                f"Details: {ev}"
+            ) from ev
+
+        if installed_ver < min_ver:
             raise RuntimeError(
                 f"SECURITY: vLLM {installed} is vulnerable to CVE-2026-22807.\n"
                 f"Minimum required version: {min_version}\n"
@@ -68,7 +77,7 @@ def check_vllm_version(
         return True
 
 
-def sanitize_path(path: str, allowed_base: str | None = None) -> Path:
+def sanitize_path(path: str | Path, allowed_base: str | Path | None = None) -> Path:
     """
     Sanitize a file path to prevent directory traversal attacks.
 
@@ -82,23 +91,33 @@ def sanitize_path(path: str, allowed_base: str | None = None) -> Path:
     Raises:
         ValueError: If the path contains traversal patterns or escapes the allowed base.
     """
-    # Reject obvious traversal patterns
-    if ".." in path:
-        raise ValueError(f"Path traversal detected: {path!r}")
-
     resolved = Path(path).resolve()
 
     # If an allowed base is specified, ensure the resolved path falls within it
-    if allowed_base:
+    if allowed_base is not None:
         base = Path(allowed_base).resolve()
-        if not str(resolved).startswith(str(base)):
+        try:
+            if not resolved.is_relative_to(base):
+                raise ValueError(
+                    f"Path escapes allowed directory.\n"
+                    f"  Path:    {resolved}\n"
+                    f"  Allowed: {base}"
+                )
+        except ValueError:
             raise ValueError(
                 f"Path escapes allowed directory.\n"
                 f"  Path:    {resolved}\n"
                 f"  Allowed: {base}"
             )
+    else:
+        # Enforce relative-only paths and block absolute traversal attempts when allowed_base is None
+        if Path(path).is_absolute():
+            raise ValueError(f"Absolute paths not permitted when allowed_base is None: {path!r}")
+        if ".." in str(path):
+            raise ValueError(f"Path traversal detected: {path!r}")
 
     return resolved
+
 
 
 def validate_parallelism(tensor_parallel_size: int, available_gpus: int) -> int:

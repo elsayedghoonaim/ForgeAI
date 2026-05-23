@@ -221,6 +221,7 @@ def chat(
         gpu_memory_utilization=gpu_utilization,
         auto_optimize=auto_optimize,
         chat_mode=True,
+        model_name=resolved,
     )
     print_runtime_tuning(tuning)
 
@@ -325,11 +326,13 @@ def chat(
 
                     history.append({"role": "user", "content": user_input})
                     prompt_text = engine.build_prompt(history)
-                    result = engine.generate(
-                        prompt=prompt_text,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        top_p=top_p,
+                    result = asyncio.run(
+                        engine.generate(
+                            prompt=prompt_text,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            top_p=top_p,
+                        )
                     )
 
                     assistant_text = result.text.strip() or "(empty response)"

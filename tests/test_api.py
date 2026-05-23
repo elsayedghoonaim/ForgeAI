@@ -24,7 +24,7 @@ class FakeEngine:
         self.last_messages = messages
         return "<templated-prompt>"
 
-    def generate(self, prompt, max_tokens, temperature, top_p, stop):
+    async def generate(self, prompt, max_tokens, temperature, top_p, stop):
         self.last_prompt = prompt
         return SimpleNamespace(
             text="hello from forgeai",

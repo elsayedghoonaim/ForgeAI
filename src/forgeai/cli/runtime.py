@@ -57,6 +57,7 @@ def resolve_runtime_tuning(
     auto_optimize: bool = False,
     chat_mode: bool = False,
     run_mode: bool = False,
+    model_name: str | None = None,
 ) -> RuntimeTuning:
     """Resolve effective TP and GPU utilization for a CLI invocation."""
 
@@ -104,6 +105,7 @@ def resolve_runtime_tuning(
                 max_num_seqs = recommend_chat_max_num_seqs(
                     topology,
                     tensor_parallel_size=tp_size,
+                    model_name=model_name,
                 )
                 auto_max_num_seqs = True
 
@@ -112,6 +114,7 @@ def resolve_runtime_tuning(
                     topology,
                     tensor_parallel_size=tp_size,
                     max_num_seqs=max_num_seqs,
+                    model_name=model_name,
                 )
                 auto_max_model_len = True
 
@@ -137,6 +140,7 @@ def resolve_runtime_tuning(
                 max_model_len = recommend_run_max_model_len(
                     topology,
                     tensor_parallel_size=tp_size,
+                    model_name=model_name,
                 )
                 auto_max_model_len = True
             else:
@@ -184,10 +188,32 @@ def resolve_runtime_tuning(
     )
 
 
+def _estimate_model_weight_mb(model_name: str | None, tensor_parallel_size: int) -> float:
+    """Estimate model weight VRAM footprint in MB."""
+    model_weight_mb = 0.0
+    if model_name:
+        try:
+            from forgeai.utils.memory_estimator import estimate_from_preset
+            preset_est = estimate_from_preset(model_name, available_vram_mb=24000, tensor_parallel_size=tensor_parallel_size)
+            if preset_est:
+                model_weight_mb = preset_est.model_params_mb + preset_est.activation_mb + preset_est.overhead_mb
+            else:
+                import re
+                match = re.search(r"(\d+)b", model_name.lower())
+                if match:
+                    b_params = float(match.group(1))
+                    params_mb = (b_params * 1e9 * 2.0) / (1024 * 1024) / tensor_parallel_size
+                    model_weight_mb = params_mb + (params_mb * 0.1) + 500.0
+        except Exception:
+            pass
+    return model_weight_mb
+
+
 def recommend_chat_max_num_seqs(
     topology: GPUTopology,
     *,
     tensor_parallel_size: int = 1,
+    model_name: str | None = None,
 ) -> int:
     """Recommend a low-latency chat concurrency target from free VRAM."""
 
@@ -196,7 +222,9 @@ def recommend_chat_max_num_seqs(
         return 1
 
     free_mb = min(gpu.free_memory_mb for gpu in target_gpus)
-    raw_target = max(1.0, math.sqrt(max(1.0, free_mb / SEQ_MEMORY_DIVISOR_MB)))
+    model_weight_mb = _estimate_model_weight_mb(model_name, tensor_parallel_size)
+    adjusted_free_mb = max(512.0, free_mb - model_weight_mb)
+    raw_target = max(1.0, math.sqrt(max(1.0, adjusted_free_mb / SEQ_MEMORY_DIVISOR_MB)))
     return _round_down_power_of_two(raw_target, minimum=1, maximum=32)
 
 
@@ -233,6 +261,7 @@ def recommend_chat_max_model_len(
     *,
     tensor_parallel_size: int = 1,
     max_num_seqs: int | None = None,
+    model_name: str | None = None,
 ) -> int:
     """Recommend a chat context limit that avoids huge startup overhead."""
 
@@ -243,9 +272,12 @@ def recommend_chat_max_model_len(
     concurrency = max_num_seqs or recommend_chat_max_num_seqs(
         topology,
         tensor_parallel_size=tensor_parallel_size,
+        model_name=model_name,
     )
     free_mb = min(gpu.free_memory_mb for gpu in target_gpus)
-    per_sequence_mb = free_mb / max(1, concurrency)
+    model_weight_mb = _estimate_model_weight_mb(model_name, tensor_parallel_size)
+    adjusted_free_mb = max(512.0, free_mb - model_weight_mb)
+    per_sequence_mb = adjusted_free_mb / max(1, concurrency)
     estimated_tokens = per_sequence_mb * CHAT_CONTEXT_TOKENS_PER_MB
     return _round_down_power_of_two(
         estimated_tokens,
@@ -268,6 +300,7 @@ def recommend_run_max_model_len(
     topology: GPUTopology,
     *,
     tensor_parallel_size: int = 1,
+    model_name: str | None = None,
 ) -> int:
     """Recommend a one-shot context limit to reduce startup overhead."""
 
@@ -276,7 +309,9 @@ def recommend_run_max_model_len(
         return 4096
 
     free_mb = min(gpu.free_memory_mb for gpu in target_gpus)
-    estimated_tokens = free_mb * RUN_CONTEXT_TOKENS_PER_MB
+    model_weight_mb = _estimate_model_weight_mb(model_name, tensor_parallel_size)
+    adjusted_free_mb = max(512.0, free_mb - model_weight_mb)
+    estimated_tokens = adjusted_free_mb * RUN_CONTEXT_TOKENS_PER_MB
     return _round_down_power_of_two(
         estimated_tokens,
         minimum=1024,

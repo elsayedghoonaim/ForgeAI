@@ -262,24 +262,24 @@ class VLLMBackend(BaseBackend):
         parts.append("Assistant:")
         return "\n\n".join(parts)
 
-    def generate(
+    async def generate(
         self,
         prompt: str,
         max_tokens: int | None = 512,
         temperature: float = 0.7,
         top_p: float = 0.95,
         stop: list[str] | None = None,
-    ) -> GenerationResult:
+     ) -> GenerationResult:
         """Generate text from a prompt."""
         if not self._is_running:
             raise RuntimeError("Engine is not initialized. Call initialize() first.")
 
         if self._streaming_enabled:
-            return asyncio.run(
-                self._generate_vllm_async(prompt, max_tokens or 512, temperature, top_p, stop)
-            )
+            return await self._generate_vllm_async(prompt, max_tokens or 512, temperature, top_p, stop)
         else:
-            return self._generate_vllm(prompt, max_tokens or 512, temperature, top_p, stop)
+            return await asyncio.to_thread(
+                self._generate_vllm, prompt, max_tokens or 512, temperature, top_p, stop
+            )
 
     def _generate_vllm(
         self,
@@ -403,8 +403,26 @@ class VLLMBackend(BaseBackend):
     def shutdown(self) -> None:
         """Gracefully shut down the engine."""
         if self._engine is not None:
+            if hasattr(self._engine, "shutdown"):
+                try:
+                    self._engine.shutdown()
+                except Exception:
+                    pass
             self._engine = None
             self._tokenizer = None
+        try:
+            import ray
+            if ray.is_initialized():
+                ray.shutdown()
+        except Exception:
+            pass
+        try:
+            import gc
+            import torch
+            gc.collect()
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
         self._is_running = False
         console.print("[yellow]vLLM Engine shut down.[/yellow]")
 

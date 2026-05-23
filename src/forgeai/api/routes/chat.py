@@ -7,6 +7,7 @@ import time
 import uuid
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 router = APIRouter()
@@ -48,11 +49,11 @@ class ChatCompletionResponse(BaseModel):
     usage: Usage = Usage()
 
 
-@router.post("/chat/completions")
+@router.post("/chat/completions", response_model=None)
 async def create_chat_completion(
     request: Request,
     body: ChatCompletionRequest,
-) -> ChatCompletionResponse:
+) -> ChatCompletionResponse | StreamingResponse:
     """OpenAI-compatible chat completion endpoint."""
 
     engine = request.app.state.engine
@@ -62,7 +63,6 @@ async def create_chat_completion(
     if body.stream:
         if not engine.supports_streaming:
             raise HTTPException(status_code=501, detail="Streaming not supported by this backend")
-        from fastapi.responses import StreamingResponse
 
         async def _stream_generator():
             prompt = engine.build_prompt([message.model_dump() for message in body.messages])
@@ -89,7 +89,7 @@ async def create_chat_completion(
 
     prompt = engine.build_prompt([message.model_dump() for message in body.messages])
     request_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-    result = engine.generate(
+    result = await engine.generate(
         prompt=prompt,
         max_tokens=body.max_tokens or 512,
         temperature=body.temperature,

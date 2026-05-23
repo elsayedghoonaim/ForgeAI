@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from collections.abc import AsyncIterator
@@ -34,6 +35,7 @@ class DevToolEngine:
         self._requests_served = 0
         self._start_time: float | None = None
         self._last_result: GenerationResult | None = None
+        self._lock = asyncio.Lock()
 
     @property
     def is_running(self) -> bool:
@@ -67,7 +69,7 @@ class DevToolEngine:
             raise RuntimeError("Engine is not initialized.")
         return self._backend.build_prompt(messages)
 
-    def generate(
+    async def generate(
         self,
         prompt: str,
         max_tokens: int = 512,
@@ -80,7 +82,8 @@ class DevToolEngine:
             raise RuntimeError("Engine is not initialized. Call initialize() first.")
 
         start = time.time()
-        result = self._backend.generate(prompt, max_tokens, temperature, top_p, stop)
+        async with self._lock:
+            result = await self._backend.generate(prompt, max_tokens, temperature, top_p, stop)
         result.elapsed_seconds = time.time() - start
         self._requests_served += 1
         self._last_result = result
@@ -110,15 +113,16 @@ class DevToolEngine:
         self._last_result = None
         start = time.time()
 
-        async for chunk in self._backend.generate_stream(
-            prompt, max_tokens, temperature, top_p, stop
-        ):
-            chunks.append(chunk)
-            # We don't have accurate token counts per chunk from all backends
-            # in a unified way here, so we approximate or leave them at 0
-            # Backend might update these inside GenerationResult later
-            completion_tokens += 1
-            yield chunk
+        async with self._lock:
+            async for chunk in self._backend.generate_stream(
+                prompt, max_tokens, temperature, top_p, stop
+            ):
+                chunks.append(chunk)
+                # We don't have accurate token counts per chunk from all backends
+                # in a unified way here, so we approximate or leave them at 0
+                # Backend might update these inside GenerationResult later
+                completion_tokens += 1
+                yield chunk
 
         elapsed = time.time() - start
         self._requests_served += 1

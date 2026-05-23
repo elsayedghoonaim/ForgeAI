@@ -7,6 +7,7 @@ like feeding thousands of PDFs through an OCR model.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from pathlib import Path
@@ -124,10 +125,12 @@ def batch(
 
                 for prompt in batch_prompts:
                     try:
-                        result = engine.generate(
-                            prompt=prompt,
-                            max_tokens=max_tokens,
-                            temperature=temperature,
+                        result = asyncio.run(
+                            engine.generate(
+                                prompt=prompt,
+                                max_tokens=max_tokens,
+                                temperature=temperature,
+                            )
                         )
                         results.append({
                             "prompt": prompt[:200],

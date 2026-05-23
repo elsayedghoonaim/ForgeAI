@@ -70,6 +70,7 @@ def run(
         gpu_memory_utilization=gpu_utilization,
         auto_optimize=auto_optimize,
         run_mode=True,
+        model_name=resolved,
     )
     print_runtime_tuning(tuning)
 
@@ -167,11 +168,13 @@ def run(
                 if result is None:
                     raise RuntimeError("Streaming completed without a final result.")
             else:
-                result = engine.generate(
-                    prompt=prompt,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
+                result = asyncio.run(
+                    engine.generate(
+                        prompt=prompt,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        top_p=top_p,
+                    )
                 )
                 console.print(Panel(result.text, title="Output", border_style="green"))
 

@@ -8,6 +8,7 @@ and a default post-download safety scan.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from rich.console import Console
@@ -15,6 +16,30 @@ from rich.console import Console
 from forgeai.utils.helpers import format_bytes
 
 console = Console()
+
+
+def _is_valid_repo_id(repo_id: str) -> bool:
+    """
+    Validate HuggingFace Hub repository ID to prevent command injection,
+    path traversal, or arbitrary snapshot commands.
+    """
+    if not repo_id or len(repo_id) > 200:
+        return False
+    
+    parts = repo_id.split("/")
+    if len(parts) > 2:
+        return False
+        
+    # Match alphanumeric, hyphen, underscore, and dot. Must not start/end with separators.
+    part_pattern = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$")
+    for part in parts:
+        if not part_pattern.match(part):
+            return False
+            
+    if ".." in repo_id or "//" in repo_id:
+        return False
+        
+    return True
 
 
 def download_model(
@@ -37,6 +62,9 @@ def download_model(
     Returns:
         Local path to the downloaded model.
     """
+    if not _is_valid_repo_id(repo_id):
+        raise ValueError(f"Invalid HuggingFace repository ID format: {repo_id!r}")
+
     try:
         from huggingface_hub import snapshot_download
     except ImportError as err:
@@ -82,6 +110,22 @@ def download_model(
                     f"[red]✗[/red] Safety scan flagged issues:\n"
                     f"  {scan_result.get('reason', 'Unknown')}"
                 )
+                try:
+                    import shutil
+                    if os.path.isdir(local_path):
+                        shutil.rmtree(local_path)
+                    elif os.path.isfile(local_path):
+                        os.remove(local_path)
+                except Exception:
+                    pass
+                
+                raise ValueError(
+                    f"SECURITY BLOCK: Model safety scan failed for {repo_id}. "
+                    f"Reason: {scan_result.get('reason', 'Unknown')}"
+                )
+        except ValueError:
+            # Re-raise the ValueError so we fail closed
+            raise
         except Exception as e:
             console.print(f"[yellow]⚠ Safety scan skipped: {e}[/yellow]")
 
@@ -119,6 +163,9 @@ def get_cached_models(cache_dir: str | None = None) -> list[dict[str, str]]:
 
 def delete_cached_model(repo_id: str, cache_dir: str | None = None) -> bool:
     """Delete a cached model."""
+    if not _is_valid_repo_id(repo_id):
+        raise ValueError(f"Invalid HuggingFace repository ID format: {repo_id!r}")
+
     import shutil
 
     cache_dir = cache_dir or os.path.join(
