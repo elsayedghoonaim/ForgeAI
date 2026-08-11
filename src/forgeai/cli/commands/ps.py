@@ -1,5 +1,5 @@
 """
-forgeai ps — Process and resource monitoring.
+forgeai ps — List active running models from local daemon.
 """
 
 from __future__ import annotations
@@ -8,58 +8,47 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from forgeai.cli.commands.ls import format_size
+from forgeai.cli.runtime import DaemonClient, DaemonClientError, handle_cli_error
+
 console = Console()
 app = typer.Typer(invoke_without_command=True)
 
 
 @app.callback(invoke_without_command=True)
-def ps() -> None:
-    """List active engines with real-time GPU memory consumption."""
-    console.print("\n[bold cyan]vLLM DevTool Processes[/bold cyan]\n")
-
-    # GPU info
+def ps(
+    host: str | None = typer.Option(None, "--host", help="Daemon host"),
+    port: int | None = typer.Option(None, "--port", help="Daemon port"),
+) -> None:
     try:
-        from forgeai.utils.gpu import detect_gpus, print_gpu_table
-        topology = detect_gpus()
-        if topology.gpus:
-            print_gpu_table(topology)
-        else:
-            console.print("[yellow]No GPUs detected.[/yellow]")
-    except Exception as e:
-        console.print(f"[dim]GPU detection unavailable: {e}[/dim]")
+        client = DaemonClient(host=host, port=port)
+        data = client.request("GET", "/api/ps")
+    except DaemonClientError as err:
+        handle_cli_error(err)
 
-    # Check for running vLLM processes
-    console.print("\n[bold]Active Processes:[/bold]")
-    try:
-        import psutil
-        found = False
-        table = Table(show_lines=True)
-        table.add_column("PID", style="cyan")
-        table.add_column("Name")
-        table.add_column("CPU %", justify="right")
-        table.add_column("Memory", justify="right")
-        table.add_column("Command")
+    models = data.get("models", [])
+    if not models:
+        console.print("[dim]No active models running.[/dim]")
+        return
 
-        for proc in psutil.process_iter(["pid", "name", "cmdline", "cpu_percent", "memory_info"]):
-            try:
-                cmd = " ".join(proc.info.get("cmdline") or [])
-                if "vllm" in cmd.lower() or "forgeai" in cmd.lower():
-                    mem = proc.info.get("memory_info")
-                    mem_str = f"{mem.rss / (1024**2):.0f} MB" if mem else "N/A"
-                    table.add_row(
-                        str(proc.info["pid"]),
-                        proc.info["name"] or "",
-                        f"{proc.info.get('cpu_percent', 0):.1f}%",
-                        mem_str,
-                        cmd[:80],
-                    )
-                    found = True
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                continue
+    table = Table(title="Running Models", show_lines=True)
+    table.add_column("NAME", style="cyan")
+    table.add_column("EXPIRATION")
+    table.add_column("VRAM", justify="right")
+    table.add_column("FORMAT")
+    table.add_column("QUANTIZATION")
+    table.add_column("KV CACHE")
 
-        if found:
-            console.print(table)
-        else:
-            console.print("[dim]No active vLLM processes found.[/dim]")
-    except ImportError:
-        console.print("[dim]psutil not installed — process listing unavailable[/dim]")
+    for item in models:
+        name = item.get("name", "")
+        expires = item.get("expires_at", "N/A")
+        vram_bytes = item.get("size_vram", 0)
+        vram_str = format_size(vram_bytes) if vram_bytes > 0 else "Unknown"
+        details = item.get("details", {}) or {}
+        fmt = details.get("format", "safetensors")
+        quant = details.get("weight_quantization") or details.get("quantization_level", "none")
+        kv_cache = details.get("kv_cache_dtype", "auto")
+
+        table.add_row(name, expires, vram_str, fmt, quant, kv_cache)
+
+    console.print(table)

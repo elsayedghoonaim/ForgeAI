@@ -1,53 +1,71 @@
-"""forgeai pull - model acquisition with integrated safety scanning."""
+"""forgeai pull - model acquisition through the running daemon."""
 
 from __future__ import annotations
 
 import typer
 from rich.console import Console
-from rich.markup import escape
+
+from forgeai.cli.runtime import DaemonClient, DaemonClientError, handle_cli_error
+from forgeai.core.telemetry import track_event
 
 console = Console()
 
 
 def pull(
     model: str = typer.Argument(..., help="Model name or HuggingFace repo ID"),
-    cache_dir: str | None = typer.Option(None, "--cache-dir", help="Cache directory"),
-    revision: str | None = typer.Option(None, "--revision", help="Model revision/branch"),
-    token: str | None = typer.Option(
-        None,
-        "--token",
-        help="HuggingFace API token (overrides stored token)",
-    ),
-    skip_scan: bool = typer.Option(False, "--skip-scan", help="Skip safety scanning"),
+    stream: bool = typer.Option(True, "--stream/--no-stream", help="Stream progress events"),
+    host: str | None = typer.Option(None, "--host", help="Daemon host"),
+    port: int | None = typer.Option(None, "--port", help="Daemon port"),
 ) -> None:
-    """Download and cache a model with a default post-download safety scan."""
+    """Download and cache a model through the running ForgeAI daemon.
 
-    from forgeai.core.telemetry import track_event
-    from forgeai.models.loader import download_model
-    from forgeai.models.zoo import resolve_model_name
+    For private HuggingFace models, credentials must be configured in the daemon
+    environment (e.g. HF_TOKEN or HUGGING_FACE_HUB_TOKEN).
+    """
 
-    if token is None:
-        from forgeai.cli.commands.config import get_stored_token
+    track_event("command.pull", {"model": model, "stream": stream})
 
-        token = get_stored_token()
-        if token:
-            console.print("[dim]Using stored HuggingFace token[/dim]")
+    console.print("\n[bold cyan]ForgeAI Pull[/bold cyan]")
+    console.print(f"  Model: {model}\n")
 
-    resolved = resolve_model_name(model)
-    console.print("\n[bold cyan]vLLM DevTool Pull[/bold cyan]")
-    console.print(f"  Model: {resolved}\n")
-
-    track_event("command.pull", {"model": resolved})
+    payload = {"name": model, "stream": stream}
 
     try:
-        local_path = download_model(
-            repo_id=resolved,
-            cache_dir=cache_dir,
-            revision=revision,
-            token=token,
-            enable_safety_scan=not skip_scan,
-        )
-        console.print(f"\n[green]OK[/green] Model ready: {local_path}")
-    except Exception as err:
-        console.print(f"\n[red]ERROR:[/red] pull failed: {escape(str(err))}")
-        raise typer.Exit(code=1) from err
+        client = DaemonClient(host=host, port=port)
+        if stream:
+            success_observed = False
+            for chunk in client.stream("POST", "/api/pull", json_data=payload):
+                status = chunk.get("status")
+                digest = chunk.get("digest")
+                if status == "success":
+                    success_observed = True
+
+                if status:
+                    if digest:
+                        console.print(f"status: {status} digest: {digest}")
+                    else:
+                        console.print(f"status: {status}")
+                elif "error" in chunk:
+                    raise DaemonClientError(str(chunk["error"]))
+
+            if not success_observed:
+                raise DaemonClientError("Pull terminated prematurely without completing model acquisition.")
+
+            console.print("\n[green]OK[/green] Model ready.")
+        else:
+            res = client.request("POST", "/api/pull", json_data=payload)
+            status = res.get("status")
+            digest = res.get("digest")
+
+            if status != "success":
+                err_msg = res.get("error") if isinstance(res, dict) else None
+                raise DaemonClientError(f"Pull failed: {err_msg or status or 'Unknown error'}")
+
+            if digest:
+                console.print(f"status: {status} digest: {digest}")
+            else:
+                console.print(f"status: {status}")
+
+            console.print("\n[green]OK[/green] Model ready.")
+    except DaemonClientError as err:
+        handle_cli_error(err)

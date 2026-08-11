@@ -2,7 +2,8 @@
 VRAM usage prediction algorithms.
 
 Predicts memory requirements based on model architecture, parameter count,
-and precision. Returns safe max_model_len values to prevent OOM errors.
+model precision, and KV-cache resource profile. Returns theoretical/planning
+estimates and safe max_model_len values to prevent OOM errors.
 """
 
 from __future__ import annotations
@@ -12,9 +13,11 @@ from dataclasses import dataclass
 from rich.console import Console
 from rich.panel import Panel
 
+from forgeai.core.resource_profiles import ProfileUnavailableError, get_resource_profile
+
 console = Console()
 
-# Bytes per parameter for each precision
+# Bytes per parameter for each model weight precision
 BYTES_PER_PARAM = {
     "float32": 4.0,
     "fp32": 4.0,
@@ -26,25 +29,13 @@ BYTES_PER_PARAM = {
     "int4": 0.5,
     "awq": 0.5,
     "gptq": 0.5,
-    "gguf_q4": 0.5,
-    "gguf_q5": 0.625,
-    "gguf_q8": 1.0,
-}
-
-# KV cache bytes per token per layer per head
-KV_CACHE_BYTES_PER_TOKEN = {
-    "float16": 4,  # 2 bytes key + 2 bytes value
-    "fp16": 4,
-    "bfloat16": 4,
-    "bf16": 4,
-    "int8": 2,
-    "float32": 8,
 }
 
 
 @dataclass
 class VRAMEstimate:
-    """Estimated VRAM usage breakdown."""
+    """Estimated VRAM usage breakdown (Theoretical / Planning Value)."""
+
     model_params_mb: float
     kv_cache_mb: float
     activation_mb: float
@@ -54,6 +45,10 @@ class VRAMEstimate:
     fits_in_vram: bool
     available_vram_mb: float
     recommended_gpu_memory_utilization: float
+    kv_cache_dtype: str = "auto"
+    kv_capacity_ratio: float = 1.0
+    bytes_per_kv_token: float = 0.0
+    is_theoretical_estimate: bool = True
 
     @property
     def total_gb(self) -> float:
@@ -69,15 +64,16 @@ def estimate_vram(
     head_dim: int = 128,
     tensor_parallel_size: int = 1,
     available_vram_mb: float = 24_000,
-    gpu_memory_utilization: float = 0.90,
-    max_num_seqs: int = 256,
+    gpu_memory_utilization: float = 0.85,
+    max_num_seqs: int = 4,
+    kv_cache_dtype: str = "auto",
 ) -> VRAMEstimate:
     """
     Estimate VRAM requirements for loading and serving a model.
 
     Args:
         param_count_billions: Model parameters in billions (e.g., 7.0 for 7B).
-        precision: Model precision / quantization format.
+        precision: Model weight precision / quantization format.
         max_model_len: Maximum sequence length.
         num_layers: Number of transformer layers.
         num_kv_heads: Number of key-value attention heads.
@@ -86,23 +82,35 @@ def estimate_vram(
         available_vram_mb: Available VRAM in MB per GPU.
         gpu_memory_utilization: Target GPU memory utilization.
         max_num_seqs: Maximum concurrent sequences.
+        kv_cache_dtype: KV cache profile / dtype (auto/bf16, fp8, turboquant_k8v4,
+                        turboquant_4bit_nc, turboquant_3bit_nc).
 
     Returns:
-        VRAMEstimate with full breakdown.
+        VRAMEstimate with full breakdown and planning fields.
+
+    Raises:
+        ValueError: If kv_cache_dtype is unknown or unsupported.
     """
+    # Look up KV cache profile (rejects unknown KV dtypes)
+    try:
+        kv_profile = get_resource_profile(kv_cache_dtype)
+    except ProfileUnavailableError as err:
+        raise ValueError(f"Unknown or unsupported KV cache dtype '{kv_cache_dtype}': {err}") from err
+
     precision_lower = precision.lower()
     bytes_per_param = BYTES_PER_PARAM.get(precision_lower, 2.0)
-    kv_bytes = KV_CACHE_BYTES_PER_TOKEN.get(precision_lower, 4)
 
     # 1. Model weights
     total_params = param_count_billions * 1e9
     params_per_gpu = total_params / tensor_parallel_size
     model_params_mb = (params_per_gpu * bytes_per_param) / (1024 * 1024)
 
-    # 2. KV cache
-    # Per token: 2 * num_kv_heads * head_dim * bytes (key + value) * num_layers
-    kv_per_token = 2 * (num_kv_heads / tensor_parallel_size) * head_dim * (kv_bytes / 2)
-    kv_total_bytes = kv_per_token * num_layers * max_model_len * max_num_seqs
+    # 2. KV cache (independent calculation based on KV profile policy)
+    # Per token per layer per GPU: 2 vectors (Key + Value) * (num_kv_heads / TP) * head_dim elements
+    kv_elements_per_token_per_layer = 2 * (num_kv_heads / tensor_parallel_size) * head_dim
+    bytes_per_token_per_layer = kv_elements_per_token_per_layer * kv_profile.bytes_per_element
+    bytes_per_kv_token = bytes_per_token_per_layer * num_layers
+    kv_total_bytes = bytes_per_kv_token * max_model_len * max_num_seqs
     kv_cache_mb = kv_total_bytes / (1024 * 1024)
 
     # 3. Activation memory (rough estimate — ~10% of model weights)
@@ -117,11 +125,12 @@ def estimate_vram(
     usable_vram_mb = available_vram_mb * gpu_memory_utilization
 
     # Calculate safe max_model_len
-    if kv_per_token * num_layers * max_num_seqs > 0:
-        remaining_for_kv = max(0, usable_vram_mb - model_params_mb - activation_mb - overhead_mb)
+    per_seq_kv_per_token_bytes = bytes_per_kv_token * max_num_seqs
+    if per_seq_kv_per_token_bytes > 0:
+        remaining_for_kv = max(0.0, usable_vram_mb - model_params_mb - activation_mb - overhead_mb)
         remaining_bytes = remaining_for_kv * 1024 * 1024
-        safe_tokens = int(remaining_bytes / (kv_per_token * num_layers * max_num_seqs))
-        safe_max_model_len = max(128, min(safe_tokens, 131072))  # Clamp to reasonable range
+        safe_tokens = int(remaining_bytes / per_seq_kv_per_token_bytes)
+        safe_max_model_len = max(128, min(safe_tokens, 131072))
     else:
         safe_max_model_len = max_model_len
 
@@ -131,7 +140,7 @@ def estimate_vram(
     if available_vram_mb > 0:
         recommended_util = min(0.95, (total_mb / available_vram_mb) + 0.05)
     else:
-        recommended_util = 0.90
+        recommended_util = 0.85
 
     return VRAMEstimate(
         model_params_mb=model_params_mb,
@@ -143,6 +152,10 @@ def estimate_vram(
         fits_in_vram=fits,
         available_vram_mb=available_vram_mb,
         recommended_gpu_memory_utilization=recommended_util,
+        kv_cache_dtype=kv_profile.kv_cache_dtype,
+        kv_capacity_ratio=kv_profile.expected_capacity_ratio,
+        bytes_per_kv_token=bytes_per_kv_token,
+        is_theoretical_estimate=True,
     )
 
 
@@ -166,6 +179,9 @@ def estimate_from_preset(
     max_model_len: int = 4096,
     tensor_parallel_size: int = 1,
     available_vram_mb: float = 24_000,
+    gpu_memory_utilization: float = 0.85,
+    max_num_seqs: int = 4,
+    kv_cache_dtype: str = "auto",
     **kwargs,
 ) -> VRAMEstimate | None:
     """Estimate VRAM from a known model preset."""
@@ -178,6 +194,9 @@ def estimate_from_preset(
         max_model_len=max_model_len,
         tensor_parallel_size=tensor_parallel_size,
         available_vram_mb=available_vram_mb,
+        gpu_memory_utilization=gpu_memory_utilization,
+        max_num_seqs=max_num_seqs,
+        kv_cache_dtype=kv_cache_dtype,
         **preset,
         **kwargs,
     )
@@ -188,9 +207,10 @@ def print_estimate(estimate: VRAMEstimate, model_name: str = "Model") -> None:
     status = "[green]✓ FITS[/green]" if estimate.fits_in_vram else "[red]✗ OOM RISK[/red]"
 
     content = (
-        f"[bold]{model_name}[/bold]  {status}\n\n"
+        f"[bold]{model_name}[/bold]  {status}\n"
+        f"[dim]Theoretical planning estimate (not measured validation)[/dim]\n\n"
         f"  Model weights:   {estimate.model_params_mb:>10,.0f} MB\n"
-        f"  KV cache:        {estimate.kv_cache_mb:>10,.0f} MB\n"
+        f"  KV cache ({estimate.kv_cache_dtype}, ~{estimate.kv_capacity_ratio:.1f}x): {estimate.kv_cache_mb:>10,.0f} MB\n"
         f"  Activations:     {estimate.activation_mb:>10,.0f} MB\n"
         f"  Overhead:        {estimate.overhead_mb:>10,.0f} MB\n"
         f"  {'─' * 32}\n"
@@ -200,4 +220,4 @@ def print_estimate(estimate: VRAMEstimate, model_name: str = "Model") -> None:
         f"  Recommended util:    {estimate.recommended_gpu_memory_utilization:.0%}"
     )
 
-    console.print(Panel(content, title="VRAM Estimate", border_style="cyan"))
+    console.print(Panel(content, title="VRAM Estimate (Theoretical Planning)", border_style="cyan"))

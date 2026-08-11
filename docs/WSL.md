@@ -1,30 +1,29 @@
 # WSL Setup
 
-This project is designed to work well from Linux and WSL. If your repository lives under `/mnt/...`, use the WSL bootstrap path documented here instead of trying to treat the checkout like a native Linux filesystem.
+This project is designed for high-performance inference on Linux and WSL2 using NVIDIA CUDA GPUs. If your repository lives under `/mnt/...`, use the WSL bootstrap script to set up a virtual environment on the native Linux filesystem.
 
 ## What This Document Covers
 
 Use this guide when you want to:
 
-- create a working `.venv` from WSL
-- install the project with or without GPU extras
+- create a working Python 3.12 `.venv` from WSL
+- install ForgeAI 2.0.0 with pinned `vllm==0.22.1` GPU extras
 - avoid editable-install failures on DrvFs mounts
 - verify CUDA and the local CLI
-- run the API and smoke-test it from WSL
+- run the single-daemon server on port 11434 and smoke-test it
 
 ## Prerequisites
 
 - WSL2
-- Ubuntu or another Linux distro with Python 3.10+
-- `git`
-- `build-essential`
-- NVIDIA Windows driver plus CUDA support exposed to WSL if you want real GPU inference
+- Ubuntu or another Linux distro with **Python 3.12**
+- `git` and `build-essential`
+- NVIDIA Windows driver with CUDA support exposed to WSL2 for GPU inference
 
-For GPU inference, the important distinction is:
+For GPU inference:
+- install the NVIDIA driver on Windows (it exposes CUDA to WSL2 automatically)
+- do not install Linux display drivers inside WSL2
 
-- install the NVIDIA driver on Windows
-- install the CUDA toolkit in WSL if needed
-- do not install Linux display drivers inside WSL
+> **Note on ROCm:** ROCm packaging requires separate official vLLM wheels/images. ForgeAI TurboQuant is unavailable and deferred on ROCm; ROCm users must explicitly select a supported non-TurboQuant KV cache dtype (`auto` or `fp8`). The `auto` setting preserves the model dtype (commonly BF16). CPU inference is unsupported (no CPU fallback exists).
 
 ## Bootstrap
 
@@ -37,36 +36,40 @@ source .venv/bin/activate
 ```
 
 What the script does:
+- requires Python 3.12
+- creates a virtual environment on the Linux filesystem if under `/mnt/...`
+- installs the project in editable mode with base dependencies and optional GPU extras (`vllm==0.22.1`)
 
-- creates a virtual environment
-- installs the project in editable mode
-- installs development dependencies
-- optionally installs the GPU extras
+## Development / Non-GPU Install
 
-When the repository is under `/mnt/...`, the script creates the real virtual environment on the Linux filesystem and links it back to `.venv`. This avoids common `pip` and editable-install issues on DrvFs-mounted paths.
-
-## Skip GPU Extras
-
-If you only want a lightweight install:
+If you only want a lightweight management environment for unit tests and code inspection without model inference:
 
 ```bash
 INSTALL_GPU=0 ./scripts/bootstrap_wsl.sh
 ```
 
+> **Warning:** Without `vllm==0.22.1`, model inference is **UNAVAILABLE**. CPU fallback is not supported.
+
 ## Manual Install
 
-If you do not want to use the bootstrap script:
+If you prefer to set up manually:
 
 ```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
-python -m pip install --no-build-isolation -e ".[dev]"
 ```
 
-For GPU inference:
+For GPU inference (required for running models):
 
 ```bash
-python -m pip install --upgrade pip setuptools wheel
 python -m pip install --no-build-isolation -e ".[gpu,dev]"
+```
+
+For management/dev only (no inference):
+
+```bash
+python -m pip install --no-build-isolation -e ".[dev]"
 ```
 
 ## CUDA and GPU Verification
@@ -74,12 +77,12 @@ python -m pip install --no-build-isolation -e ".[gpu,dev]"
 Inside the activated virtual environment:
 
 ```bash
-python -c "import torch; print('CUDA:', torch.cuda.is_available())"
-python -c "import torch; print(torch.cuda.get_device_name(0))"
+python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+python -c "import torch; print('Device name:', torch.cuda.get_device_name(0))"
 forgeai doctor --full
 ```
 
-Optional CUDA environment variables for the current shell:
+Optional CUDA environment variables:
 
 ```bash
 export CUDA_HOME=/usr/local/cuda
@@ -87,130 +90,99 @@ export PATH=/usr/local/cuda/bin:$PATH
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 ```
 
-## First Model Pull
+## Starting the Daemon Server (`serve`)
 
-If the model requires Hugging Face access, store a token first:
+`pull`, `run`, `ps`, and other CLI commands are thin clients of an already running `forgeai serve` daemon.
 
-```bash
-forgeai config login YOUR_HF_TOKEN
-```
-
-Then pull a model:
+Start the daemon first (defaults to `127.0.0.1:11434`):
 
 ```bash
-forgeai pull google/gemma-4-E2B-it
-```
-
-## Local CLI Usage
-
-One-shot inference:
-
-```bash
-forgeai run google/gemma-4-E2B-it --prompt "Explain WSL in one paragraph."
-```
-
-Interactive chat:
-
-```bash
-forgeai chat google/gemma-4-E2B-it
-```
-
-Useful chat commands:
-
-- `/exit`
-- `/quit`
-- `/clear`
-
-## API Startup
-
-Without auth:
-
-```bash
-export FORGEAI_MODEL_NAME=google/gemma-4-E2B-it
 forgeai serve
 ```
 
-With auth:
+Specify host or port explicitly if needed:
 
 ```bash
-export FORGEAI_MODEL_NAME=google/gemma-4-E2B-it
+forgeai serve --host 127.0.0.1 --port 11434
+```
+
+With API Authentication:
+
+```bash
 export FORGEAI_AUTH_ENABLED=true
 export FORGEAI_AUTH_SECRET_KEY=replace-me-with-a-real-secret
 export FORGEAI_BOOTSTRAP_API_KEY=replace-with-a-long-random-value
 forgeai serve --auth
 ```
 
-## Smoke Test
+> **Note:** Keep `forgeai serve` running in its own terminal window or background service.
 
-In another shell:
+## Local CLI Usage (Thin Client Commands)
+
+With `forgeai serve` running in another shell:
+
+### 1. Store Hugging Face Token (if pulling gated models)
 
 ```bash
-API_KEY=replace-with-a-long-random-value ./scripts/smoke_api.sh
+forgeai config login YOUR_HF_TOKEN
 ```
 
-Without auth:
+### 2. Pull a Model
+
+Pull a model repository into local cache via the running daemon:
+
+```bash
+forgeai pull Qwen/Qwen2.5-7B-Instruct
+```
+
+### 3. Register a Model Manifest (`create`)
+
+Register a model tag using a local YAML manifest (`-f` / `--file` required):
+
+```bash
+forgeai create my-model -f manifest.yaml
+```
+
+### 4. One-Shot & Interactive Inference (`run`)
+
+Send an inference request to the warm engine daemon:
+
+```bash
+forgeai run Qwen/Qwen2.5-7B-Instruct "Explain black holes simply."
+```
+
+### 5. Inspect Running Models & System GPUs (`ps`, `ls`, `show`)
+
+```bash
+forgeai ls
+forgeai ps
+forgeai show Qwen/Qwen2.5-7B-Instruct
+```
+
+### 6. Stop / Remove Models (`stop`, `rm`)
+
+```bash
+forgeai stop Qwen/Qwen2.5-7B-Instruct
+forgeai rm Qwen/Qwen2.5-7B-Instruct
+```
+
+## Smoke Test
+
+In another shell while the server is running:
 
 ```bash
 ./scripts/smoke_api.sh
 ```
 
+With auth:
+
+```bash
+API_KEY=replace-with-a-long-random-value ./scripts/smoke_api.sh
+```
+
 ## WSL-Specific Runtime Notes
 
-- vLLM may switch to the `spawn` multiprocessing start method on WSL. That is expected and trades startup speed for correctness.
-- First startup can be noticeably slower than later runs because of downloads, compilation, and cache warmup.
-- CLI commands `run` and `chat` default to quieter startup output; use `--startup-logs` when you want raw engine logs.
-- `chat` and `run` auto-tune several runtime knobs when you omit `--gpu-util`.
-- `serve` remains conservative and single-process; `--workers` must stay `1`.
-
-## Troubleshooting
-
-### Editable install fails under `/mnt/...`
-
-Use the bootstrap script or keep the `.venv` target on the Linux filesystem rather than inside the mounted Windows path.
-
-### `forgeai: command not found`
-
-Make sure the environment is activated:
-
-```bash
-source .venv/bin/activate
-which forgeai
-```
-
-If the script is still missing:
-
-```bash
-python -m pip install --no-build-isolation -e ".[gpu,dev]"
-hash -r
-```
-
-### CUDA works in one shell but not another
-
-Check that you are using the same interpreter:
-
-```bash
-which python
-echo "$VIRTUAL_ENV"
-```
-
-For this project, your interactive WSL shell is the source of truth for GPU availability.
-
-### Model startup is slow
-
-This is usually caused by some combination of:
-
-- first-time model download
-- first-time CUDA/Triton/Inductor compilation
-- limited VRAM
-- WSL process startup overhead
-
-For diagnosis:
-
-```bash
-forgeai chat google/gemma-4-E2B-it --startup-logs
-watch -n 1 nvidia-smi
-```
-
-### HTTP streaming does not work
-
-That is expected in the current build. The CLI supports streaming for `chat` and `run`, but the API endpoint `/v1/chat/completions` is still non-streaming.
+- **Multiprocessing**: vLLM may use the `spawn` start method on WSL2 for correctness.
+- **Warm-Engine Reuse & Eviction**: The daemon reuses warm vLLM engine instances in memory; eviction occurs based on `keep_alive` idle timers or model limits.
+- **Single Process**: `serve` runs a single daemon process on port 11434 without positional model arguments (`serve` has no positional model parameter). `--workers` must remain `1`.
+- **GGUF & CPU Rejection**: GGUF formats, llama.cpp, and CPU inference are unsupported. Passing `.gguf` files triggers immediate admission rejection.

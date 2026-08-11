@@ -1,77 +1,84 @@
 # ForgeAI
 
-`forgeai` is a unified, dual-backend CLI and API server for local LLMs. It wraps both **vLLM** and **llama.cpp** under a single interface:
+`forgeai` (v2.0.0) is a high-performance, vLLM-only local model runtime and daemon providing **Ollama CLI and API compatibility** alongside **OpenAI-compatible endpoints**.
 
-- a local CLI for pulling models, one-shot inference, interactive chat, diagnostics, batch jobs, and benchmarking
-- a FastAPI service with health probes, Prometheus metrics, auth hooks, and OpenAI-style chat/model endpoints
-- automatic backend selection — pass a `.gguf` file and it picks llama.cpp; pass a HuggingFace repo and it picks vLLM
-- smart GGUF discovery on HuggingFace when you want to use llama.cpp with a non-GGUF model
-- persistent local config, reusable deployment profiles, and WSL-friendly bootstrap
+- **Single Process Daemon**: `forgeai serve` runs on default local address `http://127.0.0.1:11434` (container images bind `0.0.0.0:11434`).
+- **Thin Client Architecture**: Commands like `pull`, `run`, `ls`, `ps`, `show`, `stop`, and `rm` act as thin clients communicating with the running daemon. `forgeai create` validates and registers manifests locally in the shared registry without requiring a running daemon or loading an engine.
+- **Warm-Engine Reuse**: Manages warm vLLM engine instances in memory with bounded model capacity and `keep_alive` idle eviction. No per-request serving process creation.
+- **Dual API Surface**: Exposes all 9 implemented Ollama-compatible `/api/*` endpoints (streaming via NDJSON) and OpenAI-compatible `/v1/*` endpoints (streaming via SSE).
+- **Pinned vLLM Runtime**: Pinned to exact `vllm==0.22.1` for maximum stability and native TurboQuant KV-cache support.
 
-## What This Project Is For
+---
 
-Use ForgeAI when you want a practical operational layer for:
+## Quick Start Workflow
 
-- local terminal workflows (chat, run, batch)
-- simple model-serving and smoke testing
-- lightweight API deployments with auth, rate limiting, and metrics
-- repeatable environment checks (`doctor`)
-- reproducible profiles for common deployment settings
+`pull`, `run`, and daemon-backed management commands require an already running `forgeai serve` daemon.
 
-## Supported Backends
+### 1. Start the ForgeAI Daemon
 
-| Backend | Engine | Model Format | Hardware | Install Extra |
-|---------|--------|-------------|----------|---------------|
-| **vllm** | `vllm.LLM` / `AsyncLLM` | HuggingFace safetensors | GPU only | `pip install 'forgeai[vllm]'` |
-| **llama_cpp** | `llama_cpp.Llama` | GGUF | CPU + optional GPU | `pip install 'forgeai[llamacpp]'` |
-
-Backend is selected per-run:
+In your main server shell or service manager:
 
 ```bash
-# Explicit
-forgeai run google/gemma-4-E2B-it --prompt "Hello" --backend vllm
-forgeai run ./model.gguf --prompt "Hello" --backend llama_cpp
-
-# Auto-detect (default)
-forgeai run google/gemma-4-E2B-it --prompt "Hello"        # → vllm
-forgeai run ./model.gguf --prompt "Hello"                  # → llama_cpp
+forgeai serve
 ```
 
-### Resolution order (top wins)
+### 2. Pull a Model (in another terminal)
 
-1. `--backend` CLI flag
-2. `FORGEAI_BACKEND` env var
-3. `~/.forgeai/config.yaml` → `default_backend`
-4. **Auto-detect** from model: `.gguf` file → `llama_cpp`, HF repo ID → `vllm`
+```bash
+forgeai pull Qwen/Qwen2.5-7B-Instruct
+```
+
+### 3. Run Inference
+
+```bash
+forgeai run Qwen/Qwen2.5-7B-Instruct "Explain quantum computing in 3 sentences."
+```
+
+---
+
+## Architecture & System Stance
+
+| Component | Policy & Stance |
+|-----------|-----------------|
+| **Engine** | Strictly **vLLM-only** (`vllm==0.22.1`). Alternative backends (llama.cpp) are removed. |
+| **Hardware** | Requires a supported GPU vLLM runtime (`vllm==0.22.1`). The primary bundled image and WSL path target **NVIDIA CUDA**. |
+| **ROCm Support** | Requires separate official vLLM ROCm wheels/images. TurboQuant is **unavailable/deferred on ROCm** (ROCm users must explicitly select supported non-TurboQuant KV dtypes: `auto` or `fp8`). `auto` preserves the model dtype (commonly BF16). |
+| **CPU Support** | CPU inference is **unsupported** (no CPU fallback exists). |
+| **Model Formats** | **Hugging Face repositories** and local **safetensors** directories are supported. **GGUF models are explicitly rejected** at admission time. |
+| **Manifest System** | Replaces Ollama Modelfile DSL with declarative **YAML manifests** (`ForgeAIManifest`). |
+| **Process Model** | Single persistent daemon process (`127.0.0.1:11434`) with warm-engine reuse. No per-request process spawning. |
+
+---
 
 ## Installation
 
-### Base Development Install
+ForgeAI 2.0.0 requires **Python `>=3.12,<3.13`**.
+
+### GPU Runtime Installation (vLLM)
+
+For GPU inference on NVIDIA CUDA / WSL2:
 
 ```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
+python -m pip install --no-build-isolation -e ".[gpu]"
+```
+
+### Management / Development Install (Non-Inference)
+
+For local development, unit tests, and management commands without model loading:
+
+```bash
 python -m pip install --no-build-isolation -e ".[dev]"
 ```
 
-### GPU Runtime (vLLM)
+> [!WARNING]
+> The base development installation without vLLM is provided **only** for management and unit testing. It **cannot perform model inference** and does **not** act as a CPU fallback.
 
-```bash
-python -m pip install --no-build-isolation -e ".[vllm,dev]"
-```
+### WSL2 Bootstrap
 
-### llama.cpp Runtime
-
-```bash
-python -m pip install --no-build-isolation -e ".[llamacpp,dev]"
-```
-
-### Full Install (all backends)
-
-```bash
-python -m pip install --no-build-isolation -e ".[all,dev]"
-```
-
-### WSL Bootstrap
+For WSL2 checkouts (including `/mnt/...` DrvFs mounts):
 
 ```bash
 chmod +x scripts/bootstrap_wsl.sh
@@ -79,436 +86,241 @@ chmod +x scripts/bootstrap_wsl.sh
 source .venv/bin/activate
 ```
 
-See [docs/WSL.md](docs/WSL.md) for the full WSL path.
+---
 
-## Quick Start with `google/gemma-4-E2B-it`
+## Supported Models & YAML Manifests
 
-### 1. Activate the Environment
+### Supported Model Sources
+- Hugging Face model IDs (e.g., `Qwen/Qwen2.5-7B-Instruct`, `meta-llama/Meta-Llama-3-8B-Instruct`)
+- Local directories containing valid Hugging Face safetensors weights and `config.json`
 
-```bash
-# Linux / macOS / WSL
-source .venv/bin/activate
+### Unsupported Formats
+- GGUF files (`.gguf`) — rejected with explicit admission error
+- Ollama Modelfile DSL syntax
+- llama.cpp model weights or options
+- CPU inference execution
 
-# Windows PowerShell (if you created the venv on Windows)
-# .\.venv\Scripts\activate
+### ForgeAI YAML Manifests (`src/forgeai/models/manifest.py`)
+ForgeAI replaces the legacy Ollama Modelfile DSL with declarative YAML manifests matching the `ForgeAIManifest` schema:
+
+```yaml
+schema_version: "2.0"
+source_kind: "huggingface"
+name: "qwen-custom"
+model: "Qwen/Qwen2.5-7B-Instruct"
+revision: "main"
+tokenizer_override: null
+system_prompt: "You are a helpful, expert AI pair programming assistant."
+chat_template: "jinja"
+parameters:
+  temperature: 0.7
+  top_p: 0.95
+  top_k: 40
+  max_tokens: 2048
+  stop: []
+engine_settings:
+  tensor_parallel_size: 1
+  pipeline_parallel_size: 1
+  gpu_memory_utilization: 0.85
+  enforce_eager: false
+  weight_quantization: "fp8"          # Model-weight quantization (none, awq, gptq, fp8, bitsandbytes)
+  trust_remote_code: false
+kv_cache:
+  dtype: "turboquant_4bit_nc"         # KV-cache quantization (auto, fp8, turboquant_k8v4, turboquant_4bit_nc)
 ```
 
-### 2. Optional: Store a Hugging Face Token
+---
+
+## Quantization: Model-Weight vs KV-Cache
+
+ForgeAI explicitly distinguishes between model-weight quantization and KV-cache quantization:
+
+1. **Model-Weight Quantization** (`engine_settings.weight_quantization`): Controls weight precision loaded into VRAM. Supported options depend on model weights and vLLM capabilities: `none`, `awq`, `gptq`, `fp8`, `bitsandbytes`.
+2. **KV-Cache Quantization** (`kv_cache.dtype`): Controls precision of the key-value attention cache in vLLM memory:
+   - `auto`: Preserves the model's native execution precision (commonly BF16)
+   - `fp8`: 8-bit floating point KV cache
+   - `turboquant_4bit_nc` & `turboquant_k8v4`: Native TurboQuant presets exposed by pinned `vllm==0.22.1`.
+
+> [!IMPORTANT]
+> `turboquant_4bit_nc` and `turboquant_k8v4` are native in pinned `vllm==0.22.1` ([vLLM TurboQuant Docs](https://docs.vllm.ai/en/v0.22.1/api/vllm/model_executor/layers/quantization/turboquant/)), but remain **experimental and POC-gated** in ForgeAI until Task 7 hardware validation. No GPU runtime validation was performed on this machine.
+
+---
+
+## Ollama-Compatible CLI Commands
+
+Daemon-backed CLI commands (`pull`, `run`, `ps`, `stop`, etc.) communicate with an active `forgeai serve` daemon. `forgeai create` operates directly on the local manifest registry without loading an engine.
+
+### `serve`
+Start the single-daemon model server (default local bind: `127.0.0.1:11434`). `serve` takes options only and has no positional model argument.
 
 ```bash
-forgeai config login YOUR_HF_TOKEN
+forgeai serve [--host 127.0.0.1] [--port 11434]
 ```
-
-### 3. Pull the Model
-
-```bash
-forgeai pull google/gemma-4-E2B-it
-```
-
-### 4. Run One-Shot Inference
-
-```bash
-forgeai run google/gemma-4-E2B-it --prompt "Explain black holes simply in 5 bullet points."
-```
-
-### 5. Start Interactive Chat
-
-```bash
-forgeai chat google/gemma-4-E2B-it
-```
-
-### 6. Start the API Server
-
-```bash
-forgeai serve google/gemma-4-E2B-it
-```
-
-### 7. Smoke Test the API
-
-```bash
-./scripts/smoke_api.sh
-```
-
-## Command Entry Point
-
-```bash
-forgeai --help
-```
-
-Global options:
-
-- `--version`, `-V`: show the package version
-- `--verbose`, `-v`: enable debug logging
-
-Fallback:
-
-```bash
-python -m forgeai --help
-```
-
-## Command Reference
 
 ### `pull`
-
-Download and cache a model from HuggingFace.
-
-```bash
-forgeai pull MODEL [OPTIONS]
-```
-
-Options:
-
-- `--cache-dir TEXT`: custom HuggingFace cache directory
-- `--revision TEXT`: model branch, tag, or revision
-- `--token TEXT`: HuggingFace token override
-- `--skip-scan`: skip post-download safety scan
-
-Examples:
+Download and register model weights into local Hugging Face cache via the daemon.
 
 ```bash
-forgeai pull google/gemma-4-E2B-it
-forgeai pull google/gemma-4-E2B-it --revision main
+forgeai pull Qwen/Qwen2.5-7B-Instruct
 ```
 
 ### `run`
-
-One-shot inference from the terminal.
-
-```bash
-forgeai run MODEL --prompt TEXT [OPTIONS]
-```
-
-Options:
-
-- `--prompt`, `-p TEXT`: required input prompt
-- `--max-tokens INTEGER`: max tokens, default `512`
-- `--temperature`, `-t FLOAT`: sampling temperature, default `0.7`
-- `--top-p FLOAT`: top-p sampling, default `0.95`
-- `--backend`, `-b TEXT`: `auto`, `vllm`, or `llama_cpp`, default `auto`
-- `--n-gpu-layers INTEGER`: GPU layers for llama.cpp (`-1` = all), default `0`
-- `--n-ctx INTEGER`: context window for llama.cpp, default `4096`
-- `--auto-optimize`: auto-tune tensor parallel size
-- `--dry-run`: validate and estimate memory without loading weights
-- `--gpu-util FLOAT`: target GPU utilization (vLLM only, auto-tuned when omitted)
-- `--tp INTEGER`: tensor parallel size (vLLM only)
-- `--stream/--no-stream`: stream tokens or wait, default `--stream`
-- `--startup-logs`: show raw startup logs
-
-Examples:
+Run one-shot inference or start interactive terminal chat via the daemon.
 
 ```bash
-forgeai run google/gemma-4-E2B-it --prompt "Hello"
-forgeai run google/gemma-4-E2B-it --prompt "Summarize this" --no-stream
-forgeai run google/gemma-4-E2B-it --prompt "Explain CUDA" --dry-run
-forgeai run ./model.gguf --prompt "Hello" --n-gpu-layers -1
+forgeai run Qwen/Qwen2.5-7B-Instruct "Explain black holes in one paragraph."
 ```
 
-### `chat`
-
-Interactive terminal chat session.
+### `create`
+Register a model tag from a local YAML manifest file (`-f` / `--file` required). Validates and writes the manifest through the local `ModelRegistry` in the shared ForgeAI home/registry; does not require a running daemon or load a vLLM engine.
 
 ```bash
-forgeai chat MODEL [OPTIONS]
+forgeai create my-model -f manifest.yaml
 ```
 
-Options:
-
-- `--system TEXT`: optional system prompt
-- `--max-tokens INTEGER`: max tokens per response, default `512`
-- `--temperature`, `-t FLOAT`: sampling temperature, default `0.7`
-- `--top-p FLOAT`: top-p sampling, default `0.95`
-- `--backend`, `-b TEXT`: `auto`, `vllm`, or `llama_cpp`
-- `--n-gpu-layers INTEGER`: GPU layers for llama.cpp
-- `--n-ctx INTEGER`: context window for llama.cpp
-- `--auto-optimize`: auto-tune TP size
-- `--gpu-util FLOAT`: GPU utilization (vLLM only)
-- `--tp INTEGER`: tensor parallel size (vLLM only)
-- `--stream/--no-stream`: default `--stream`
-- `--startup-logs`: show raw startup logs
-
-Slash commands: `/exit`, `/quit`, `/clear`
+### `ls`
+List registered model tags and manifests.
 
 ```bash
-forgeai chat google/gemma-4-E2B-it
-forgeai chat google/gemma-4-E2B-it --system "You are a concise assistant."
-forgeai chat ./model.gguf --n-gpu-layers -1
+forgeai ls
 ```
-
-### `serve`
-
-Start the FastAPI production API server.
-
-```bash
-forgeai serve [MODEL] [OPTIONS]
-```
-
-If `MODEL` is omitted, uses `FORGEAI_MODEL_NAME`.
-
-Options:
-
-- `--host TEXT`: bind address, default `0.0.0.0`
-- `--port INTEGER`: bind port, default `8000`
-- `--backend`, `-b TEXT`: `auto`, `vllm`, or `llama_cpp`
-- `--n-gpu-layers INTEGER`: GPU layers for llama.cpp
-- `--n-ctx INTEGER`: context window for llama.cpp
-- `--gpu-util FLOAT`: GPU utilization (auto-tuned when omitted)
-- `--tp INTEGER`: tensor parallel size
-- `--auto-optimize`: auto-tune TP size
-- `--auth`: enable authentication
-- `--workers INTEGER`: Uvicorn workers, must be `1`
-- `--log-level TEXT`: log level, default `info`
-
-```bash
-forgeai serve google/gemma-4-E2B-it
-forgeai serve google/gemma-4-E2B-it --host 127.0.0.1 --port 8000
-forgeai serve ./model.gguf --backend llama_cpp --n-gpu-layers -1
-```
-
-#### Auth for `serve`
-
-```bash
-export FORGEAI_AUTH_ENABLED=true
-export FORGEAI_AUTH_SECRET_KEY=replace-me-with-a-real-secret
-export FORGEAI_BOOTSTRAP_API_KEY=replace-with-a-long-random-value
-export FORGEAI_BOOTSTRAP_API_KEY_NAME=bootstrap
-export FORGEAI_BOOTSTRAP_API_KEY_ROLE=admin
-forgeai serve google/gemma-4-E2B-it --auth
-```
-
-### `doctor`
-
-Validate the environment and print a deployment audit summary.
-
-```bash
-forgeai doctor [--full]
-```
-
-Checks: Python version, vLLM availability, llama-cpp-python availability, GPU detection, CUDA, runtime deps, security.
 
 ### `ps`
-
-Inspect detected GPUs and running ForgeAI processes.
+Inspect currently running warm model engines and GPU utilization.
 
 ```bash
 forgeai ps
 ```
 
-### `batch`
-
-Offline JSONL processing.
-
-```bash
-forgeai batch MODEL --input FILE [OPTIONS]
-```
-
-Options:
-
-- `--input`, `-i TEXT`: required input JSONL path
-- `--output`, `-o TEXT`: output JSONL path, default `output.jsonl`
-- `--max-tokens INTEGER`: max tokens per request, default `512`
-- `--temperature FLOAT`: default `0.0`
-- `--batch-size INTEGER`: logical batch size, default `32`
-- `--prompt-field TEXT`: JSON field, default `prompt`
-- `--backend`, `-b TEXT`: `auto`, `vllm`, or `llama_cpp`
-- `--n-gpu-layers INTEGER`: GPU layers for llama.cpp
-- `--n-ctx INTEGER`: context window for llama.cpp
+### `show`
+Inspect model details, manifest parameters, and engine settings.
 
 ```bash
-forgeai batch google/gemma-4-E2B-it --input prompts.jsonl
-forgeai batch google/gemma-4-E2B-it --input prompts.jsonl --output results.jsonl
+forgeai show Qwen/Qwen2.5-7B-Instruct
 ```
 
-### `benchmark`
-
-Repeatable performance measurement.
+### `stop`
+Evict a warm model engine from GPU memory.
 
 ```bash
-forgeai benchmark MODEL [OPTIONS]
+forgeai stop Qwen/Qwen2.5-7B-Instruct
 ```
 
-Options:
-
-- `--iterations`, `-n INTEGER`: measured runs, default `5`
-- `--max-tokens INTEGER`: max tokens per run, default `256`
-- `--warmup INTEGER`: warmup iterations, default `1`
-- `--prompt TEXT`: custom benchmark prompt
-- `--backend`, `-b TEXT`: `auto`, `vllm`, or `llama_cpp`
-- `--n-gpu-layers INTEGER`: GPU layers for llama.cpp
-- `--n-ctx INTEGER`: context window for llama.cpp
+### `rm`
+Remove a model manifest or local model registration.
 
 ```bash
-forgeai benchmark google/gemma-4-E2B-it
-forgeai benchmark google/gemma-4-E2B-it --iterations 10 --warmup 2
+forgeai rm Qwen/Qwen2.5-7B-Instruct
 ```
 
-### `config`
+---
 
-Manage persistent local settings.
+## Deprecated & Rejected Flags (Migration Matrix)
 
-```bash
-forgeai config set KEY VALUE
-forgeai config get KEY
-forgeai config list
-forgeai config delete KEY
-forgeai config login TOKEN
-```
+ForgeAI 2.0.0 is strictly vLLM-only. Legacy llama.cpp flags and dual-backend selectors are rejected at CLI admission:
 
-Config stored at `~/.forgeai/config.yaml`.
+| Deprecated Command / Option | Status in 2.0.0 | Migration Action |
+|-----------------------------|-----------------|------------------|
+| `--backend` / `-b` | **REJECTED** | Removed. Engine is strictly vLLM. |
+| `--n-gpu-layers` | **REJECTED** | Removed. vLLM offloads all layers to GPU. |
+| `--n-ctx` | **REJECTED** | Use daemon `--max-model-len` or `FORGEAI_MAX_MODEL_LEN` (vLLM model-context setting). Note that `parameters.max_tokens` is a generation token limit, not model context length. |
+| `.gguf` file arguments | **REJECTED** | Use HF safetensors model repositories or local directories. |
+| `Modelfile` syntax | **REJECTED** | Use ForgeAI YAML manifests (`forgeai create TAG -f manifest.yaml`). |
+| CPU execution | **REJECTED** | Supported GPU vLLM runtime required. CPU fallback is unsupported. |
+| `serve MODEL` positional | **REJECTED** | `serve` accepts host/port flags; models are selected via request/run. |
 
-### `profile`
-
-Manage reusable deployment profiles.
-
-```bash
-forgeai profile save NAME [OPTIONS]
-forgeai profile load NAME
-forgeai profile list
-forgeai profile delete NAME
-```
-
-Profiles stored under `~/.forgeai/profiles/`.
+---
 
 ## API Reference
 
-When the server is running: `http://HOST:PORT/docs`
+Default server address: `http://127.0.0.1:11434`
 
-Endpoints:
+### Implemented Ollama-Compatible Endpoints (`/api/*`)
+Streaming on Ollama endpoints uses **Newline-Delimited JSON (NDJSON)** (`"stream": true`).
 
-- `GET /healthz` — liveness probe
-- `GET /readyz` — readiness probe
+1. `POST /api/generate` — Text generation completion (NDJSON streaming)
+2. `POST /api/chat` — Chat completion (NDJSON streaming)
+3. `POST /api/embed` — Compute text embeddings
+4. `GET /api/tags` — List registered model tags (`ls`)
+5. `GET /api/ps` — List running warm model engines (`ps`)
+6. `POST /api/show` — Show model manifest details
+7. `POST /api/pull` — Pull model weights
+8. `DELETE /api/delete` — Delete model registration
+9. `GET /api/version` — Get server version string
+
+### OpenAI-Compatible Endpoints (`/v1/*`)
+Streaming on OpenAI endpoints uses **Server-Sent Events (SSE)** (`"stream": true`).
+
+- `GET /v1/models` — List served models
+- `GET /v1/models/{model_id}` — Inspect specific model
+- `POST /v1/chat/completions` — OpenAI-compatible chat completions (SSE streaming)
+
+### Service Probes & Diagnostics
+- `GET /healthz` — Liveness probe
+- `GET /readyz` — Readiness probe
 - `GET /metrics` — Prometheus metrics
-- `GET /v1/models` — list served models
-- `GET /v1/models/{model_id}` — model details
-- `POST /v1/chat/completions` — OpenAI-compatible chat completion (streaming and non-streaming)
 
-### `POST /v1/chat/completions`
+---
 
-Supported fields: `model`, `messages`, `temperature`, `top_p`, `max_tokens`, `stream`, `stop`.
+## Docker & Container Deployment
 
-Non-streaming:
+### Base Image Strategy
+ForgeAI 2.0.0 uses an NVIDIA vLLM base image (`vllm/vllm-openai:v0.22.1`).
+
+> [!NOTE]
+> Production operators should resolve and pin the official base image by immutable `RepoDigest` (e.g., `vllm/vllm-openai@sha256:...`) after pulling.
+
+### Docker Build & Run
 
 ```bash
-curl http://127.0.0.1:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "google/gemma-4-E2B-it",
-    "messages": [{"role": "user", "content": "Say hello in one sentence."}],
-    "max_tokens": 128,
-    "temperature": 0.7
-  }'
+docker build -t forgeai:2.0.0 .
+docker run --gpus all -p 11434:11434 forgeai:2.0.0
 ```
 
-Streaming (SSE):
+### Docker Compose
 
 ```bash
-curl http://127.0.0.1:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "google/gemma-4-E2B-it",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "stream": true
-  }'
+docker compose up -d
 ```
 
-> **Note:** Streaming is supported when the backend supports it (llama.cpp always does; vLLM requires `--stream` at startup).
-
-## Runtime Behavior
-
-### Dynamic Runtime Tuning
-
-When `--gpu-util` is omitted, the CLI derives a hardware-aware target from detected GPU topology and free VRAM.
-
-- `chat` auto-tunes `max_num_seqs`, `max_model_len`, eager execution
-- `run` auto-tunes `max_num_seqs`, `max_model_len`, `max_num_batched_tokens`, eager execution
-- `serve` auto-tunes GPU utilization, TP only with `--auto-optimize`
-
-Environment overrides:
-
-- `FORGEAI_MAX_NUM_SEQS`, `FORGEAI_MAX_MODEL_LEN`, `FORGEAI_ENFORCE_EAGER`
-- `FORGEAI_RUN_MAX_NUM_SEQS`, `FORGEAI_RUN_MAX_MODEL_LEN`, `FORGEAI_RUN_ENFORCE_EAGER`, `FORGEAI_RUN_MAX_NUM_BATCHED_TOKENS`
-
-### Quiet Startup vs Raw Logs
-
-`chat` and `run` default to quiet startup. Use `--startup-logs` for raw engine output.
-
-## Environment Variables
-
-All settings use the `FORGEAI_` prefix. Key variables:
-
-| Variable | Description |
-|----------|-------------|
-| `FORGEAI_MODEL_NAME` | Default model name or HF repo ID |
-| `FORGEAI_BACKEND` | Backend selector: `auto`, `vllm`, `llama_cpp` |
-| `FORGEAI_MODEL_PATH` | Local model path |
-| `FORGEAI_MAX_MODEL_LEN` | Override model context limit |
-| `FORGEAI_TENSOR_PARALLEL_SIZE` | Tensor parallel size |
-| `FORGEAI_GPU_MEMORY_UTILIZATION` | Target GPU memory utilization |
-| `FORGEAI_N_GPU_LAYERS` | llama.cpp GPU layer offload |
-| `FORGEAI_N_CTX` | llama.cpp context window size |
-| `FORGEAI_HOST` | Server bind host |
-| `FORGEAI_PORT` | Server bind port |
-| `FORGEAI_AUTH_ENABLED` | Enable API auth |
-| `FORGEAI_AUTH_SECRET_KEY` | JWT signing secret |
-| `FORGEAI_TELEMETRY_ENABLED` | Opt-in telemetry |
-
-Non-prefixed: `HF_TOKEN`, `HF_HOME`, `CUDA_HOME`/`CUDA_PATH`.
-
-## Docker
-
-Build for a specific backend:
+### Kubernetes
 
 ```bash
-# All backends (default)
-docker build -t forgeai .
-
-# vLLM only
-docker build --build-arg BACKEND=vllm -t forgeai-vllm .
-
-# llama.cpp only
-docker build --build-arg BACKEND=llamacpp -t forgeai-llamacpp .
+kubectl apply -f k8s/deployment.yaml
 ```
 
-Run:
+---
+
+## Official Reference Links
+
+- [Official Ollama Documentation](https://docs.ollama.com/)
+- [Official vLLM Documentation (v0.22.1)](https://docs.vllm.ai/en/v0.22.1/)
+- [vLLM TurboQuant Quantization API](https://docs.vllm.ai/en/v0.22.1/api/vllm/model_executor/layers/quantization/turboquant/)
+- [vLLM GPU Installation Guide](https://docs.vllm.ai/en/v0.22.1/getting_started/installation/gpu/)
+- [ForgeAI Self-Contained Execution Plan](docs/plans/ollama-vllm-turboquant.md) — Full compatibility and resource allocation matrix.
+
+---
+
+## Unexecuted Deferred Validation Commands
+
+The following verification commands were deferred as required by the action safety policy:
 
 ```bash
-docker run --gpus all -p 8000:8000 forgeai serve google/gemma-4-E2B-it
-```
-
-## Python SDK
-
-See [sdk/python/README.md](sdk/python/README.md).
-
-## Diagnostics and Testing
-
-```bash
+# Code quality and unit tests (CPU/no-GPU)
 python -m pytest tests -v --tb=short
 python -m ruff check src tests
-forgeai doctor --full
+python -m mypy src
+
+# Container & deployment dry-runs
+docker build -t forgeai:2.0.0 .
+docker compose config
+kubectl apply --dry-run=client -f k8s/deployment.yaml
+
+# API smoke verification (against a running daemon)
 ./scripts/smoke_api.sh
 ```
 
-## Project Layout
-
-```text
-src/forgeai/
-|-- api/           FastAPI app and HTTP routes
-|-- cli/           Typer commands and runtime tuning helpers
-|-- core/          Settings, engine lifecycle, backend abstraction
-|   `-- backends/  BaseBackend, VLLMBackend, LlamaCppBackend, factory
-|-- models/        Model download, metadata, GGUF discovery
-|-- monitoring/    Logging and metrics
-|-- security/      Auth, middleware, rate limiting, compliance
-`-- utils/         GPU inspection, helpers, memory estimation
-
-tests/             Automated regression coverage
-docs/              Supplemental documentation
-sdk/python/        Async Python SDK
-```
-
-## Security and Compliance
-
-- See [SECURITY.md](SECURITY.md) for disclosure policy and security architecture
-- See [src/forgeai/security/compliance/soc2_requirements.md](src/forgeai/security/compliance/soc2_requirements.md) for SOC2 control mapping
+---
 
 ## License
 

@@ -30,9 +30,6 @@ def batch(
     temperature: float = typer.Option(0.0, "--temperature", help="Sampling temperature"),
     batch_size: int = typer.Option(32, "--batch-size", help="Requests per batch"),
     prompt_field: str = typer.Option("prompt", "--prompt-field", help="JSON field for prompt"),
-    backend: str = typer.Option("auto", "--backend", "-b", help="Backend: auto, vllm, llama_cpp"),
-    n_gpu_layers: int = typer.Option(0, "--n-gpu-layers", help="GPU layers for llama.cpp (-1 = all)"),
-    n_ctx: int = typer.Option(4096, "--n-ctx", help="Context window for llama.cpp"),
 ) -> None:
     """High-throughput offline processing from JSONL files."""
     from forgeai.core.config import DevToolSettings
@@ -40,6 +37,14 @@ def batch(
     from forgeai.models.zoo import resolve_model_name
 
     resolved = resolve_model_name(model)
+    if resolved.lower().endswith(".gguf") or ".gguf" in resolved.lower():
+        console.print(
+            f"[red]ERROR:[/red] GGUF model format is unsupported in ForgeAI v2.0+ (model: {resolved!r}). "
+            "llama.cpp has been removed in favor of vLLM. "
+            "Remediation: Specify a Hugging Face repo ID or local safetensors directory."
+        )
+        raise typer.Exit(code=1)
+
     console.print("\n[bold cyan]ForgeAI Batch[/bold cyan]")
     console.print(f"  Model:  {resolved}")
     console.print(f"  Input:  {input_file}")
@@ -66,35 +71,8 @@ def batch(
 
     console.print(f"  Loaded {len(prompts)} prompts")
 
-    if backend in ("llama_cpp", "auto") and not resolved.endswith(".gguf") and backend == "llama_cpp":
-        from forgeai.models.gguf_finder import find_gguf_for_model
-        console.print(f"[dim]Searching HuggingFace for GGUF variants of {resolved}...[/dim]")
-        candidates = find_gguf_for_model(resolved)
-        if candidates:
-            best = candidates[0]
-            console.print(f"[dim]Found GGUF variant: {best.repo_id} / {best.filename}[/dim]")
-            try:
-                from huggingface_hub import hf_hub_download
-                console.print(f"[dim]Downloading {best.filename} (this may take a while)...[/dim]")
-                resolved = hf_hub_download(repo_id=best.repo_id, filename=best.filename)
-                console.print(f"[green]OK[/green] Downloaded to {resolved}")
-            except Exception as e:
-                console.print(f"[red]ERROR:[/red] Failed to download GGUF: {e}")
-                raise typer.Exit(code=1) from e
-        else:
-            console.print(f"\n[red]ERROR:[/red] Model \"{resolved}\" is not in GGUF format, and no GGUF variants were found.")
-            console.print("\nThe llama_cpp backend requires GGUF models. Options:")
-            console.print(f"  1. Use the vllm backend instead:\n     forgeai batch {resolved} --backend vllm")
-            console.print("  2. Convert it manually to GGUF using llama.cpp scripts.")
-            raise typer.Exit(code=1) from None
-
     # Initialize engine
-    settings = DevToolSettings(
-        model_name=resolved,
-        backend=backend,
-        n_gpu_layers=n_gpu_layers,
-        n_ctx=n_ctx,
-    )
+    settings = DevToolSettings(model_name=resolved)
 
     try:
         from forgeai.core.engine import DevToolEngine

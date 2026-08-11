@@ -12,28 +12,8 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from forgeai.api.server import create_app
-from forgeai.core.backends.llamacpp_backend import LlamaCppBackend
-from forgeai.core.config import DevToolSettings
-
-
-class MockLlamaEngine:
-    def __init__(self, metadata=None, bos_token_id=1, eos_token_id=2):
-        self.metadata = metadata or {}
-        self._bos_token_id = bos_token_id
-        self._eos_token_id = eos_token_id
-
-    def token_bos(self):
-        return self._bos_token_id
-
-    def token_eos(self):
-        return self._eos_token_id
-
-    def detokenize(self, tokens):
-        if tokens == [self._bos_token_id]:
-            return b"<s>"
-        if tokens == [self._eos_token_id]:
-            return b"</s>"
-        return b""
+from forgeai.core.backends.factory import create_backend, resolve_backend
+from forgeai.core.config import BackendType, DevToolSettings, QuantizationType
 
 
 class FakeStreamingEngine:
@@ -64,81 +44,60 @@ class ApiComplianceTests(unittest.IsolatedAsyncioTestCase):
         transport = httpx.ASGITransport(app=app)
         return httpx.AsyncClient(transport=transport, base_url="http://testserver")
 
-    def test_llamacpp_jinja_rendering(self) -> None:
-        """Verify that LlamaCppBackend renders Jinja templates correctly when present in metadata."""
-        settings = DevToolSettings(model_name="custom-model")
-        backend = LlamaCppBackend(settings)
+    def test_backend_vllm_only_contract(self) -> None:
+        """Verify that resolve_backend unambiguously returns VLLM and never llama.cpp."""
+        settings = DevToolSettings(model_name="meta-llama/Llama-3-8B-Instruct")
+        backend_type = resolve_backend(settings)
+        self.assertEqual(backend_type, BackendType.VLLM)
+        self.assertEqual(backend_type.value, "vllm")
 
-        # Set up engine with metadata Jinja template
-        jinja_template = "{% for msg in messages %}<|role|>-{{ msg.role }}\n<|content|>-{{ msg.content }}\n{% endfor %}"
-        mock_engine = MockLlamaEngine(metadata={"tokenizer.chat_template": jinja_template})
-        backend._engine = mock_engine
+    def test_gguf_model_path_rejection(self) -> None:
+        """Verify that .gguf model paths/references are explicitly rejected with clear error text."""
+        # 1. DevToolSettings construction rejection
+        with self.assertRaises(ValueError) as ctx:
+            DevToolSettings(model_name="model.gguf")
+        self.assertIn("GGUF model format is unsupported in ForgeAI v2.0+", str(ctx.exception))
+        self.assertIn("llama.cpp has been removed in favor of vLLM", str(ctx.exception))
 
-        messages = [
-            {"role": "system", "content": "You are a test helper."},
-            {"role": "user", "content": "Hello!"}
-        ]
+        # 2. Factory boundary rejection using validation-bypass object
+        bypassed_settings = DevToolSettings.model_construct(model_name="model.gguf")
+        with self.assertRaises(ValueError) as ctx_resolve:
+            resolve_backend(bypassed_settings)
+        self.assertIn("GGUF model format is unsupported in ForgeAI v2.0+", str(ctx_resolve.exception))
 
-        prompt = backend.build_prompt(messages)
-        expected = "<|role|>-system\n<|content|>-You are a test helper.\n<|role|>-user\n<|content|>-Hello!\n"
-        self.assertEqual(prompt, expected)
+        with self.assertRaises(ValueError) as ctx_create:
+            create_backend(bypassed_settings)
+        self.assertIn("GGUF model format is unsupported in ForgeAI v2.0+", str(ctx_create.exception))
 
-    def test_llamacpp_jinja_bos_eos_rendering(self) -> None:
-        """Verify that LlamaCppBackend passes detokenized bos_token and eos_token to Jinja rendering."""
-        settings = DevToolSettings(model_name="custom-model")
-        backend = LlamaCppBackend(settings)
+    def test_legacy_llamacpp_options_and_backend_rejection(self) -> None:
+        """Verify that removed llama.cpp options and legacy backends are rejected with actionable errors."""
+        # 1. backend="llama_cpp"
+        with self.assertRaises(ValueError) as ctx_backend:
+            DevToolSettings(backend="llama_cpp")  # type: ignore[arg-type]
+        self.assertIn("llama.cpp backend and legacy options have been removed", str(ctx_backend.exception))
+        self.assertIn("vLLM is now the sole inference engine", str(ctx_backend.exception))
 
-        # Template using bos/eos
-        jinja_template = "{{ bos_token }}{% for msg in messages %}{{ msg.content }}{% endfor %}{{ eos_token }}"
-        mock_engine = MockLlamaEngine(metadata={"tokenizer.chat_template": jinja_template})
-        backend._engine = mock_engine
+        # 2. Removed field n_ctx
+        with self.assertRaises(ValueError) as ctx_nctx:
+            DevToolSettings(n_ctx=4096)
+        self.assertIn("llama.cpp backend and legacy options have been removed", str(ctx_nctx.exception))
 
-        messages = [{"role": "user", "content": "content"}]
-        prompt = backend.build_prompt(messages)
-        self.assertEqual(prompt, "<s>content</s>")
+        # 3. Removed field n_gpu_layers
+        with self.assertRaises(ValueError) as ctx_ngpu:
+            DevToolSettings(n_gpu_layers=35)
+        self.assertIn("llama.cpp backend and legacy options have been removed", str(ctx_ngpu.exception))
 
-    def test_llamacpp_llama3_fallback(self) -> None:
-        """Verify dynamic fallback to Llama-3 instruction template structure based on model name."""
-        settings = DevToolSettings(model_name="Meta-Llama-3-8B-Instruct.Q4_K_M.gguf")
-        backend = LlamaCppBackend(settings)
-        backend._engine = None  # No engine, forcing fallback
+        # 4. Accepted backend="vllm"
+        valid_settings = DevToolSettings(model_name="meta-llama/Llama-3-8B", backend=BackendType.VLLM)
+        self.assertEqual(valid_settings.backend, BackendType.VLLM)
 
-        messages = [
-            {"role": "system", "content": "Sys prompt"},
-            {"role": "user", "content": "Hello"}
-        ]
-        prompt = backend.build_prompt(messages)
-        self.assertIn("<|begin_of_text|>", prompt)
-        self.assertIn("<|start_header_id|>system<|end_header_id|>\n\nSys prompt<|eot_id|>", prompt)
-        self.assertIn("<|start_header_id|>user<|end_header_id|>\n\nHello<|eot_id|>", prompt)
-        self.assertIn("<|start_header_id|>assistant<|end_header_id|>\n\n", prompt)
-
-    def test_llamacpp_chatml_fallback(self) -> None:
-        """Verify dynamic fallback to ChatML templates based on model name."""
-        settings = DevToolSettings(model_name="qwen2-7b-instruct.gguf")
-        backend = LlamaCppBackend(settings)
-        backend._engine = None
-
-        messages = [
-            {"role": "user", "content": "Hello"}
-        ]
-        prompt = backend.build_prompt(messages)
-        self.assertEqual(prompt, "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n")
-
-    def test_llamacpp_llama2_fallback(self) -> None:
-        """Verify dynamic fallback to Llama-2/Mistral tags based on model name."""
-        settings = DevToolSettings(model_name="mistral-7b-instruct-v0.2.Q4_K_M.gguf")
-        backend = LlamaCppBackend(settings)
-        backend._engine = None
-
-        messages = [
-            {"role": "system", "content": "Sys"},
-            {"role": "user", "content": "Hello"},
-            {"role": "assistant", "content": "Hi"},
-            {"role": "user", "content": "End"}
-        ]
-        prompt = backend.build_prompt(messages)
-        self.assertEqual(prompt, "<s>[INST] <<SYS>>\nSys\n<</SYS>>\n\nHello [/INST] Hi </s><s>[INST] End [/INST]")
+    def test_legacy_quantization_gguf_removed(self) -> None:
+        """Verify that GGUF quantization variant is removed and not accepted."""
+        allowed_quant = [e.value for e in QuantizationType]
+        self.assertNotIn("gguf", allowed_quant)
+        with self.assertRaises(ValueError) as ctx_quant:
+            DevToolSettings(quantization="gguf")  # type: ignore[arg-type]
+        self.assertIn("GGUF model format and quantization variants are unsupported", str(ctx_quant.exception))
 
     async def test_openai_api_streaming_compliance(self) -> None:
         """Assert FastAPI routes conform to standard OpenAI specifications for streaming completions."""

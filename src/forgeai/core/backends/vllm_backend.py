@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import importlib
+import inspect
 import math
 import os
 import tempfile
@@ -15,11 +16,12 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+
 from rich.console import Console
 
 from forgeai.core.backends.base import BaseBackend, GenerationResult
 from forgeai.core.config import BackendType, DevToolSettings
-from forgeai.core.security import check_vllm_version
+from forgeai.core.security import check_required_vllm_version
 from forgeai.utils.gpu import GPU_MEMORY_STARTUP_RESERVE_MB
 
 console = Console()
@@ -63,8 +65,9 @@ class VLLMBackend(BaseBackend):
 
         with self._startup_context():
             if self.settings.enforce_version_check:
-                check_vllm_version(announce_success=not self._quiet_startup)
+                check_required_vllm_version(announce_success=not self._quiet_startup)
 
+            validate_turboquant_hardware(self.settings.kv_cache_dtype)
             self._preflight_vllm_memory()
             if self._streaming_enabled:
                 self._init_vllm_async()
@@ -84,7 +87,7 @@ class VLLMBackend(BaseBackend):
             from vllm import LLM
         except ImportError as err:
             raise RuntimeError(
-                "vLLM is not installed. Install it with: pip install 'forgeai[vllm]'"
+                "vLLM is not installed. Install exact version with: pip install 'vllm==0.22.1'"
             ) from err
 
         kwargs = self.settings.to_vllm_kwargs()
@@ -100,8 +103,8 @@ class VLLMBackend(BaseBackend):
             from vllm.v1.engine.async_llm import AsyncLLM
         except ImportError as err:
             raise RuntimeError(
-                "Streaming requires a vLLM build with AsyncLLM support. "
-                "Install it with: pip install 'forgeai[vllm]'"
+                "Streaming requires vLLM 0.22.1 with AsyncLLM support. "
+                "Install exact version with: pip install 'vllm==0.22.1'"
             ) from err
 
         engine_args_kwargs = self._build_async_engine_args_kwargs()
@@ -121,14 +124,26 @@ class VLLMBackend(BaseBackend):
             "trust_remote_code": kwargs["trust_remote_code"],
             "disable_log_stats": True,
         }
+        if "tokenizer" in kwargs and kwargs["tokenizer"]:
+            engine_args_kwargs["tokenizer"] = kwargs["tokenizer"]
+        if "revision" in kwargs and kwargs["revision"]:
+            engine_args_kwargs["revision"] = kwargs["revision"]
         if "enforce_eager" in kwargs:
             engine_args_kwargs["enforce_eager"] = kwargs["enforce_eager"]
+
+
         if "max_num_batched_tokens" in kwargs:
             engine_args_kwargs["max_num_batched_tokens"] = kwargs["max_num_batched_tokens"]
         if "max_model_len" in kwargs:
             engine_args_kwargs["max_model_len"] = kwargs["max_model_len"]
         if "quantization" in kwargs:
             engine_args_kwargs["quantization"] = kwargs["quantization"]
+        if "kv_cache_dtype" in kwargs:
+            engine_args_kwargs["kv_cache_dtype"] = kwargs["kv_cache_dtype"]
+        if "pipeline_parallel_size" in kwargs:
+            engine_args_kwargs["pipeline_parallel_size"] = kwargs["pipeline_parallel_size"]
+        if "dtype" in kwargs:
+            engine_args_kwargs["dtype"] = kwargs["dtype"]
         return engine_args_kwargs
 
     @contextmanager
@@ -270,16 +285,25 @@ class VLLMBackend(BaseBackend):
         temperature: float = 0.7,
         top_p: float = 0.95,
         stop: list[str] | None = None,
-     ) -> GenerationResult:
+        top_k: int | None = None,
+    ) -> GenerationResult:
         """Generate text from a prompt."""
         if not self._is_running:
             raise RuntimeError("Engine is not initialized. Call initialize() first.")
 
         if self._streaming_enabled:
-            return await self._generate_vllm_async(prompt, max_tokens or 512, temperature, top_p, stop)
+            return await self._generate_vllm_async(
+                prompt, max_tokens or 512, temperature, top_p, stop, top_k
+            )
         else:
             return await asyncio.to_thread(
-                self._generate_vllm, prompt, max_tokens or 512, temperature, top_p, stop
+                self._generate_vllm,
+                prompt,
+                max_tokens or 512,
+                temperature,
+                top_p,
+                stop,
+                top_k,
             )
 
     def _generate_vllm(
@@ -289,16 +313,21 @@ class VLLMBackend(BaseBackend):
         temperature: float,
         top_p: float,
         stop: list[str] | None,
+        top_k: int | None = None,
     ) -> GenerationResult:
         """Generate using the vLLM backend."""
         from vllm import SamplingParams
 
-        params = SamplingParams(
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            stop=stop,
-        )
+        kwargs: dict[str, Any] = {
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "stop": stop,
+        }
+        if top_k is not None:
+            kwargs["top_k"] = top_k
+
+        params = SamplingParams(**kwargs)
         outputs = self._engine.generate([prompt], params)
         return self._request_output_to_result(outputs[0])
 
@@ -309,18 +338,23 @@ class VLLMBackend(BaseBackend):
         temperature: float,
         top_p: float,
         stop: list[str] | None,
+        top_k: int | None = None,
     ) -> GenerationResult:
         """Generate a full completion using the async vLLM engine."""
         from vllm import SamplingParams
         from vllm.sampling_params import RequestOutputKind
 
-        params = SamplingParams(
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            stop=stop,
-            output_kind=RequestOutputKind.FINAL_ONLY,
-        )
+        kwargs: dict[str, Any] = {
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "stop": stop,
+            "output_kind": RequestOutputKind.FINAL_ONLY,
+        }
+        if top_k is not None:
+            kwargs["top_k"] = top_k
+
+        params = SamplingParams(**kwargs)
 
         final_output: Any = None
         async for output in self._engine.generate(
@@ -366,6 +400,7 @@ class VLLMBackend(BaseBackend):
         temperature: float = 0.7,
         top_p: float = 0.95,
         stop: list[str] | None = None,
+        top_k: int | None = None,
     ) -> AsyncIterator[str]:
         """Stream output deltas from the async vLLM runtime."""
         if not self._is_running:
@@ -379,13 +414,17 @@ class VLLMBackend(BaseBackend):
         from vllm import SamplingParams
         from vllm.sampling_params import RequestOutputKind
 
-        params = SamplingParams(
-            max_tokens=max_tokens or 512,
-            temperature=temperature,
-            top_p=top_p,
-            stop=stop,
-            output_kind=RequestOutputKind.DELTA,
-        )
+        kwargs: dict[str, Any] = {
+            "max_tokens": max_tokens or 512,
+            "temperature": temperature,
+            "top_p": top_p,
+            "stop": stop,
+            "output_kind": RequestOutputKind.DELTA,
+        }
+        if top_k is not None:
+            kwargs["top_k"] = top_k
+
+        params = SamplingParams(**kwargs)
 
         async for output in self._engine.generate(
             prompt,
@@ -400,6 +439,30 @@ class VLLMBackend(BaseBackend):
             chunk = getattr(completion, "text", "")
             if chunk:
                 yield chunk
+
+    async def embed(self, input_texts: list[str]) -> list[list[float]]:
+        """Generate vector embeddings using vLLM engine pooling if supported."""
+        if not self._is_running or self._engine is None:
+            raise RuntimeError("Engine is not initialized.")
+
+        embed_func = None
+        if hasattr(self._engine, "embed") and callable(self._engine.embed):
+            embed_func = self._engine.embed
+        elif hasattr(self._engine, "encode") and callable(self._engine.encode):
+            embed_func = self._engine.encode
+
+        if embed_func is None:
+            raise NotImplementedError("This vLLM model/engine lacks pooling/embed support.")
+
+        if inspect.iscoroutinefunction(embed_func):
+            raw_res = await embed_func(input_texts)
+        else:
+            raw_res = await asyncio.to_thread(embed_func, input_texts)
+            if inspect.isawaitable(raw_res):
+                raw_res = await raw_res
+
+        return _normalize_embeddings(raw_res)
+
 
     def shutdown(self) -> None:
         """Gracefully shut down the engine."""
@@ -422,6 +485,42 @@ class VLLMBackend(BaseBackend):
             torch.cuda.empty_cache()
         self._is_running = False
         console.print("[yellow]vLLM Engine shut down.[/yellow]")
+
+
+def _normalize_embeddings(raw_output: Any) -> list[list[float]]:
+    if raw_output is None:
+        raise NotImplementedError("vLLM pooling returned None.")
+
+    if hasattr(raw_output, "tolist"):
+        raw_output = raw_output.tolist()
+
+    if not isinstance(raw_output, (list, tuple)):
+        raise NotImplementedError(f"Unsupported vLLM embed output format: {type(raw_output).__name__}")
+
+    normalized: list[list[float]] = []
+    for item in raw_output:
+        vec = None
+        if hasattr(item, "outputs") and hasattr(item.outputs, "embedding"):
+            vec = item.outputs.embedding
+        elif hasattr(item, "embedding"):
+            vec = item.embedding
+        elif isinstance(item, (list, tuple)):
+            vec = item
+        elif hasattr(item, "tolist"):
+            vec = item.tolist()
+
+        if vec is None:
+            raise NotImplementedError(f"Cannot extract embedding vector from item of type {type(item).__name__}")
+
+        if hasattr(vec, "tolist"):
+            vec = vec.tolist()
+
+        try:
+            normalized.append([float(x) for x in vec])
+        except (TypeError, ValueError) as err:
+            raise NotImplementedError(f"Vector elements could not be converted to float: {err}") from err
+
+    return normalized
 
 
 def _merge_pythonwarnings(existing: str | None) -> str:
@@ -453,3 +552,67 @@ def _write_startup_sitecustomize(path: Path) -> None:
             f"warnings.filterwarnings('ignore', message={message!r}, category={category.__name__})"
         )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def validate_turboquant_hardware(
+    kv_cache_dtype: str,
+    *,
+    gpu_detector: Any = None,
+    is_rocm: bool | None = None,
+) -> None:
+    """
+    Validate hardware compatibility for TurboQuant presets before engine construction.
+    """
+    from forgeai.core.engine import (
+        NoCompatibleGPUError,
+        ROCmDeferredError,
+        TurboQuantHWCCError,
+    )
+
+    if not kv_cache_dtype or not isinstance(kv_cache_dtype, str):
+        return
+
+    dtype = kv_cache_dtype.lower().strip()
+    if not (
+        dtype.startswith("turboquant")
+        or dtype in ("turboquant_k8v4", "turboquant_4bit_nc", "turboquant_3bit_nc")
+    ):
+        return
+
+    # Check ROCm platform
+    if is_rocm is True or (
+        is_rocm is None
+        and (
+            os.environ.get("ROCM_HOME")
+            or os.environ.get("HIP_VISIBLE_DEVICES")
+            or os.environ.get("FORGEAI_IS_ROCM") == "1"
+        )
+    ):
+        raise ROCmDeferredError(
+            f"ERROR: TurboQuant is deferred on AMD ROCm (requested kv_cache_dtype '{kv_cache_dtype}'). "
+            "Remediation: Set kv_cache.dtype to 'auto' or 'fp8'."
+        )
+
+    # Detect GPU topology
+    if gpu_detector is not None:
+        topology = gpu_detector()
+    else:
+        from forgeai.utils.gpu import detect_gpus
+
+        topology = detect_gpus()
+
+    if topology.gpu_count == 0:
+        raise NoCompatibleGPUError(
+            "ERROR: ForgeAI requires a compatible NVIDIA CUDA GPU. "
+            "CPU execution is unsupported."
+        )
+
+    for gpu in topology.gpus:
+        major, minor = gpu.compute_capability
+        if (major, minor) < (7, 5):
+            cc_str = f"{major}.{minor}" if (major, minor) != (0, 0) else "0.0 (unknown)"
+            raise TurboQuantHWCCError(
+                f"ERROR: TurboQuant requires NVIDIA CUDA Compute Capability >= 7.5. "
+                f"Detected device CC: {cc_str}. Remediation: Set kv_cache.dtype to 'auto' or 'fp8'."
+            )
+

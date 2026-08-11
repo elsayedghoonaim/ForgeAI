@@ -5,31 +5,26 @@ from forgeai.core.config import BackendType, DevToolSettings
 
 
 def resolve_backend(settings: DevToolSettings) -> BackendType:
-    """Resolve the appropriate backend based on settings and model format."""
-
-    # 1. Explicit setting
-    if settings.backend is not None and settings.backend != BackendType.AUTO:
-        return settings.backend
-
-    # 2. Auto-detect from model
+    """Resolve the appropriate backend based on settings."""
     model = settings.model_path or settings.model_name
-    if model and model.endswith(".gguf"):
-        return BackendType.LLAMA_CPP
-
-    # Default fallback
+    if model and (".gguf" in model.lower() or model.lower().endswith(".gguf")):
+        raise ValueError(
+            f"ERROR: GGUF model format is unsupported in ForgeAI v2.0+ (model: {model!r}). "
+            "llama.cpp has been removed in favor of vLLM. "
+            "Remediation: Specify a Hugging Face repo ID or local safetensors directory."
+        )
     return BackendType.VLLM
 
 
 def create_backend(settings: DevToolSettings, streaming: bool = False, quiet_startup: bool = False) -> BaseBackend:
-    """Create and return the resolved backend."""
+    """Create and return the vLLM backend."""
+    model = settings.model_path or settings.model_name
+    if model and (".gguf" in model.lower() or model.lower().endswith(".gguf")):
+        raise ValueError(
+            f"ERROR: GGUF model format is unsupported in ForgeAI v2.0+ (model: {model!r}). "
+            "llama.cpp has been removed in favor of vLLM. "
+            "Remediation: Specify a Hugging Face repo ID or local safetensors directory."
+        )
 
-    backend_type = resolve_backend(settings)
-
-    if backend_type == BackendType.VLLM:
-        from forgeai.core.backends.vllm_backend import VLLMBackend
-        return VLLMBackend(settings, streaming=streaming, quiet_startup=quiet_startup)
-    elif backend_type == BackendType.LLAMA_CPP:
-        from forgeai.core.backends.llamacpp_backend import LlamaCppBackend
-        return LlamaCppBackend(settings, streaming=streaming, quiet_startup=quiet_startup)
-
-    raise ValueError(f"Unknown backend type: {backend_type}")
+    from forgeai.core.backends.vllm_backend import VLLMBackend
+    return VLLMBackend(settings, streaming=streaming, quiet_startup=quiet_startup)

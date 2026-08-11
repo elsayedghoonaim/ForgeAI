@@ -1,31 +1,52 @@
-"""Configuration management for the ForgeAI dual-backend runtime."""
+"""Configuration management for the ForgeAI vLLM runtime."""
 
 from __future__ import annotations
 
 import os
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 
 class BackendType(str, Enum):
-    """Known backend identifiers kept for compatibility with older configs."""
+    """Known backend identifiers."""
 
     VLLM = "vllm"
-    LLAMA_CPP = "llama_cpp"
-    AUTO = "auto"
 
 
 class QuantizationType(str, Enum):
-    """Known quantization identifiers kept for compatibility with older configs."""
+    """Known quantization identifiers."""
 
     NONE = "none"
     AWQ = "awq"
     GPTQ = "gptq"
-    GGUF = "gguf"
+    FP8 = "fp8"
+    BITSANDBYTES = "bitsandbytes"
     AUTO = "auto"
+
+
+class KVCacheSettings(BaseSettings):
+    """vLLM KV-cache quantization configuration settings."""
+
+    dtype: str = Field(default="auto", description="KV cache quantization format")
+
+    @field_validator("dtype", mode="before")
+    @classmethod
+    def validate_dtype(cls, value: str) -> str:
+        val = value.lower().strip() if isinstance(value, str) else value
+        allowed = {"auto", "fp8", "turboquant_k8v4", "turboquant_4bit_nc"}
+        if val == "turboquant_3bit_nc":
+            raise ValueError(
+                "turboquant_3bit_nc is an aggressive POC-only profile and is not accepted in normal runtime config."
+            )
+        if val not in allowed:
+            raise ValueError(
+                f"Invalid kv_cache_dtype '{value}'. Must be one of {sorted(allowed)}."
+            )
+        return val
 
 
 class DevToolSettings(BaseSettings):
@@ -41,11 +62,15 @@ class DevToolSettings(BaseSettings):
     # --- Model ---
     model_name: str = Field(default="", description="Model name or HuggingFace repo ID")
     model_path: str | None = Field(default=None, description="Local path to model weights")
+    tokenizer: str | None = Field(default=None, description="Custom tokenizer model or directory path")
+    revision: str | None = Field(default=None, description="Hugging Face model revision or commit hash")
     max_model_len: int | None = Field(default=None, ge=1, description="Maximum context length")
     trust_remote_code: bool = Field(default=False, description="Allow remote code execution")
 
+
+
     # --- Backend ---
-    backend: BackendType | None = Field(default=BackendType.AUTO, description="Inference backend")
+    backend: BackendType | None = Field(default=BackendType.VLLM, description="Inference backend")
     quantization: QuantizationType = Field(
         default=QuantizationType.AUTO,
         description="Quantization format",
@@ -53,8 +78,10 @@ class DevToolSettings(BaseSettings):
 
     # --- GPU / Parallelism ---
     tensor_parallel_size: int = Field(default=1, ge=1, description="Tensor parallel GPUs")
+    pipeline_parallel_size: int = Field(default=1, ge=1, description="Pipeline parallel GPUs")
+    dtype: str = Field(default="auto", description="Model weights data type")
     gpu_memory_utilization: float = Field(
-        default=0.90,
+        default=0.85,
         ge=0.1,
         le=1.0,
         description="Target GPU memory utilization",
@@ -68,13 +95,14 @@ class DevToolSettings(BaseSettings):
         ge=1,
         description="Maximum tokens scheduled in a single batch",
     )
-    max_num_seqs: int = Field(default=256, ge=1, description="Max concurrent sequences")
+    max_num_seqs: int = Field(default=4, ge=1, description="Max concurrent sequences")
 
-    # --- llama.cpp Specific ---
-    n_gpu_layers: int = Field(default=0, description="GPU layers to offload (-1 = all)")
-    n_ctx: int = Field(default=4096, ge=128, description="Context window size")
-    n_batch: int = Field(default=512, ge=1, description="Batch size for prompt processing")
-    chat_format: str | None = Field(default=None, description="Chat template override")
+    # --- Shared Engine Lifecycle & Admission ---
+    max_loaded_models: int = Field(default=1, ge=1, description="Max loaded engines in VRAM")
+    load_concurrency: int = Field(default=1, ge=1, description="Model load concurrency limit")
+    request_queue_depth: int = Field(default=32, ge=1, description="Max queued load requests")
+    default_keep_alive: str = Field(default="5m", description="Default engine keep_alive TTL")
+    kv_cache_dtype: str = Field(default="auto", description="KV cache quantization format")
 
     # --- Server ---
     host: str = Field(default="0.0.0.0", description="API server host")
@@ -152,9 +180,85 @@ class DevToolSettings(BaseSettings):
         header = value.strip() if isinstance(value, str) else value
         return header or "X-Request-ID"
 
+    @field_validator("kv_cache_dtype", mode="before")
+    @classmethod
+    def validate_kv_cache_dtype(cls, value: str) -> str:
+        val = value.lower().strip() if isinstance(value, str) else value
+        allowed = {"auto", "fp8", "turboquant_k8v4", "turboquant_4bit_nc"}
+        if val == "turboquant_3bit_nc":
+            raise ValueError(
+                "turboquant_3bit_nc is an aggressive POC-only profile and is not accepted in normal runtime config."
+            )
+        if val not in allowed:
+            raise ValueError(
+                f"Invalid kv_cache_dtype '{value}'. Must be one of {sorted(allowed)}."
+            )
+        return val
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_legacy_llamacpp_options(cls, values: Any) -> Any:
+        """Reject removed llama.cpp options and legacy backend choices with an actionable error."""
+        if not isinstance(values, dict):
+            return values
+
+        legacy_fields = {"n_gpu_layers", "n_ctx", "n_batch", "chat_format"}
+        lowered_keys = {str(k).lower(): k for k in values.keys()}
+        detected_legacy = [lowered_keys[k] for k in legacy_fields if k in lowered_keys]
+
+        backend_val = values.get("backend")
+        backend_str = ""
+        if isinstance(backend_val, str):
+            backend_str = backend_val.lower().strip()
+        elif hasattr(backend_val, "value"):
+            backend_str = str(backend_val.value).lower().strip()
+
+        is_legacy_backend = bool(backend_str) and backend_str != "vllm"
+
+        quant_val = values.get("quantization")
+        quant_str = ""
+        if isinstance(quant_val, str):
+            quant_str = quant_val.lower().strip()
+        elif hasattr(quant_val, "value"):
+            quant_str = str(quant_val.value).lower().strip()
+
+        is_legacy_quant = quant_str == "gguf"
+
+        if is_legacy_quant:
+            raise ValueError(
+                f"ERROR: GGUF model format and quantization variants are unsupported in ForgeAI v2.0+ (quantization={quant_val!r}). "
+                "llama.cpp has been removed in favor of vLLM. "
+                "Remediation: Specify Hugging Face repo IDs or local safetensors directories and vLLM-compatible settings."
+            )
+
+        if detected_legacy or is_legacy_backend:
+            reasons = []
+            if is_legacy_backend:
+                reasons.append(f"backend={backend_val!r}")
+            if detected_legacy:
+                reasons.append(f"legacy fields: {sorted(detected_legacy)}")
+
+            raise ValueError(
+                f"ERROR: llama.cpp backend and legacy options have been removed in ForgeAI v2.0+ ({', '.join(reasons)}). "
+                "vLLM is now the sole inference engine. "
+                "Remediation: Specify Hugging Face repo IDs or local safetensors directories and vLLM-compatible settings."
+            )
+        return values
+
     @model_validator(mode="after")
     def validate_runtime_scope(self) -> DevToolSettings:
-        """Validate backend consistency."""
+        """Validate backend consistency and concurrency constraints."""
+        model_str = (self.model_path or self.model_name).strip()
+        if model_str and (".gguf" in model_str.lower() or model_str.lower().endswith(".gguf")):
+            raise ValueError(
+                f"ERROR: GGUF model format is unsupported in ForgeAI v2.0+ (model: {model_str!r}). "
+                "llama.cpp has been removed in favor of vLLM. "
+                "Remediation: Specify a Hugging Face repo ID or local safetensors directory."
+            )
+        if self.load_concurrency > self.max_loaded_models:
+            raise ValueError(
+                f"load_concurrency ({self.load_concurrency}) cannot exceed max_loaded_models ({self.max_loaded_models})."
+            )
         return self
 
     def ensure_directories(self) -> None:
@@ -170,12 +274,20 @@ class DevToolSettings(BaseSettings):
         kwargs: dict[str, object] = {
             "model": self.model_path or self.model_name,
             "tensor_parallel_size": self.tensor_parallel_size,
+            "pipeline_parallel_size": self.pipeline_parallel_size,
+            "dtype": self.dtype,
             "gpu_memory_utilization": self.gpu_memory_utilization,
             "max_num_seqs": self.max_num_seqs,
             "trust_remote_code": self.trust_remote_code,
+            "kv_cache_dtype": self.kv_cache_dtype,
         }
+        if self.tokenizer:
+            kwargs["tokenizer"] = self.tokenizer
+        if self.revision:
+            kwargs["revision"] = self.revision
         if self.enforce_eager:
             kwargs["enforce_eager"] = True
+
         if self.max_num_batched_tokens:
             kwargs["max_num_batched_tokens"] = self.max_num_batched_tokens
         if self.max_model_len:
@@ -183,18 +295,6 @@ class DevToolSettings(BaseSettings):
         if self.quantization not in (
             QuantizationType.AUTO,
             QuantizationType.NONE,
-            QuantizationType.GGUF,
         ):
             kwargs["quantization"] = self.quantization.value
         return kwargs
-
-    def to_llamacpp_kwargs(self) -> dict[str, object]:
-        """Convert settings to llama-cpp-python engine keyword arguments."""
-        return {
-            "model_path": self.model_path or self.model_name,
-            "n_ctx": self.n_ctx,
-            "n_gpu_layers": self.n_gpu_layers,
-            "n_batch": self.n_batch,
-            "chat_format": self.chat_format,
-            "verbose": False,
-        }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
@@ -15,7 +16,8 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from forgeai import __version__
-from forgeai.api.routes import chat, health, models
+from forgeai.api.routes import chat, health, models, ollama
+from forgeai.core.engine import EngineManagerError
 from forgeai.monitoring.logging import get_logger
 from forgeai.monitoring.metrics import ACTIVE_REQUESTS, ENGINE_STATUS, record_request
 
@@ -39,8 +41,20 @@ def _error_response(
     message: str,
     error_type: str,
     details: object | None = None,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     request_id, header_name = _request_id(request, app)
+    merged_headers = {header_name: request_id}
+    if headers:
+        merged_headers.update(headers)
+
+    if request.url.path.startswith("/api/"):
+        return JSONResponse(
+            status_code=status_code,
+            headers=merged_headers,
+            content={"error": message},
+        )
+
     error_payload: dict[str, object] = {
         "type": error_type,
         "message": message,
@@ -52,7 +66,7 @@ def _error_response(
     payload: dict[str, object] = {"error": error_payload}
     return JSONResponse(
         status_code=status_code,
-        headers={header_name: request_id},
+        headers=merged_headers,
         content=payload,
     )
 
@@ -66,12 +80,16 @@ def create_app(
     settings: Any = None,
     audit_logger: Any = None,
     rate_limiter: Any = None,
+    engine_manager: Any = None,
+    model_registry: Any = None,
+    cache_manager: Any = None,
+    runtime_adapter: Any = None,
 ) -> FastAPI:
     """
     Create and configure the FastAPI application.
 
     Args:
-        engine: DevToolEngine instance to serve.
+        engine: DevToolEngine instance to serve (legacy).
         title: API title.
         enable_cors: Enable CORS middleware.
         enable_auth: Enable authentication middleware.
@@ -79,25 +97,61 @@ def create_app(
         settings: Runtime settings object.
         audit_logger: Audit logger used by security middleware.
         rate_limiter: Rate limiter used by security middleware.
+        engine_manager: EngineManager supervisor instance.
+        model_registry: ModelRegistry instance.
+        cache_manager: CacheManager instance.
+        runtime_adapter: SharedRuntimeAdapter instance.
     """
 
     if enable_auth and auth_manager is None:
         raise ValueError("Authentication is enabled but no auth_manager was provided.")
 
+    if runtime_adapter is None and (
+        engine_manager is not None or model_registry is not None or cache_manager is not None
+    ):
+        from forgeai.api.runtime import SharedRuntimeAdapter
+
+        runtime_adapter = SharedRuntimeAdapter(
+            engine_manager=engine_manager,
+            model_registry=model_registry,
+            cache_manager=cache_manager,
+            settings=settings,
+        )
+
+    if runtime_adapter is not None:
+        if engine_manager is None:
+            engine_manager = runtime_adapter.engine_manager
+        if model_registry is None:
+            model_registry = runtime_adapter.model_registry
+        if cache_manager is None:
+            cache_manager = runtime_adapter.cache_manager
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
+        mgr = getattr(app.state, "engine_manager", None)
+        if mgr is not None and hasattr(mgr, "shutdown"):
+            await mgr.shutdown()
+
     app = FastAPI(
         title=title,
         version=__version__,
-        description="OpenAI-compatible API powered by ForgeAI",
+        description="OpenAI and Ollama compatible API powered by ForgeAI",
         docs_url="/docs",
         redoc_url="/redoc",
+        lifespan=lifespan,
     )
 
     app.state.engine = engine
+    app.state.engine_manager = engine_manager
+    app.state.model_registry = model_registry
+    app.state.cache_manager = cache_manager
+    app.state.runtime_adapter = runtime_adapter
     app.state.auth_manager = auth_manager
     app.state.settings = settings or SimpleNamespace(request_id_header="X-Request-ID")
     app.state.audit_logger = audit_logger
     app.state.rate_limiter = rate_limiter
-    ENGINE_STATUS.set(1 if engine is not None and engine.is_running else 0)
+    ENGINE_STATUS.set(1 if engine is not None and getattr(engine, "is_running", False) else 0)
 
     if enable_cors:
         app.add_middleware(
@@ -106,6 +160,25 @@ def create_app(
             allow_credentials=False,
             allow_methods=["*"],
             allow_headers=["*"],
+        )
+
+    @app.exception_handler(EngineManagerError)
+    async def handle_engine_manager_error(request: Request, exc: EngineManagerError) -> JSONResponse:
+        status_code = 503
+        if exc.code == "ERR_QUEUE_FULL":
+            status_code = 429
+        elif exc.code == "ERR_ENGINE_FAILED_OOM":
+            status_code = 503
+
+        request_id, header_name = _request_id(request, request.app)
+        headers = {header_name: request_id, "X-ForgeAI-Error-Code": exc.code}
+        return _error_response(
+            request,
+            request.app,
+            status_code,
+            str(exc),
+            exc.code,
+            headers=headers,
         )
 
     @app.exception_handler(StarletteHTTPException)
@@ -196,6 +269,7 @@ def create_app(
     app.include_router(health.router, tags=["Health"])
     app.include_router(models.router, prefix="/v1", tags=["Models"])
     app.include_router(chat.router, prefix="/v1", tags=["Chat"])
+    app.include_router(ollama.router, prefix="/api", tags=["Ollama"])
 
     @app.get("/metrics", tags=["Monitoring"])
     async def metrics() -> Response:

@@ -4,7 +4,7 @@ metadata:
   name: forgeai
   labels:
     app: forgeai
-    version: "1.1.0"
+    version: "2.0.0"
 spec:
   replicas: 1
   selector:
@@ -16,16 +16,16 @@ spec:
         app: forgeai
       annotations:
         prometheus.io/scrape: "true"
-        prometheus.io/port: "8000"
+        prometheus.io/port: "11434"
         prometheus.io/path: "/metrics"
     spec:
       containers:
         - name: forgeai
-          image: forgeai:latest
+          image: forgeai:2.0.0
           command: ["forgeai", "serve"]
-          args: ["--host", "0.0.0.0", "--port", "8000"]
+          args: ["--host", "0.0.0.0", "--port", "11434"]
           ports:
-            - containerPort: 8000
+            - containerPort: 11434
               name: http
               protocol: TCP
           env:
@@ -33,8 +33,12 @@ spec:
               value: "Qwen/Qwen2.5-7B-Instruct"
             - name: FORGEAI_TELEMETRY_ENABLED
               value: "false"
+            - name: HOME
+              value: "/data"
             - name: HF_HOME
-              value: "/models"
+              value: "/data/.cache/huggingface"
+            - name: FORGEAI_HOME
+              value: "/data/.forgeai"
           resources:
             requests:
               cpu: "4"
@@ -61,12 +65,12 @@ spec:
             timeoutSeconds: 5
             failureThreshold: 5
           volumeMounts:
-            - name: model-cache
-              mountPath: /models
+            - name: forgeai-data
+              mountPath: /data
       volumes:
-        - name: model-cache
+        - name: forgeai-data
           persistentVolumeClaim:
-            claimName: forgeai-model-cache
+            claimName: forgeai-data-pvc
       tolerations:
         - key: nvidia.com/gpu
           operator: Exists
@@ -81,7 +85,7 @@ metadata:
 spec:
   type: ClusterIP
   ports:
-    - port: 8000
+    - port: 11434
       targetPort: http
       protocol: TCP
       name: http
@@ -91,7 +95,7 @@ spec:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: forgeai-model-cache
+  name: forgeai-data-pvc
 spec:
   accessModes:
     - ReadWriteOnce

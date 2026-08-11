@@ -16,7 +16,6 @@ from forgeai.cli.runtime import (
     recommend_run_max_model_len,
 )
 from forgeai.core.backends.base import BaseBackend, GenerationResult
-from forgeai.core.backends.llamacpp_backend import LlamaCppBackend
 from forgeai.core.backends.vllm_backend import VLLMBackend
 from forgeai.core.config import DevToolSettings
 from forgeai.core.engine import DevToolEngine
@@ -70,10 +69,7 @@ class ArchitecturePatchesTests(unittest.TestCase):
         # 3. VLLMBackend
         self.assertTrue(iscoroutinefunction(VLLMBackend.generate))
 
-        # 4. LlamaCppBackend
-        self.assertTrue(iscoroutinefunction(LlamaCppBackend.generate))
-
-        # 5. DevToolEngine
+        # 4. DevToolEngine
         self.assertTrue(iscoroutinefunction(DevToolEngine.generate))
 
     @patch("forgeai.core.backends.vllm_backend.console")
@@ -102,21 +98,7 @@ class ArchitecturePatchesTests(unittest.TestCase):
         self.assertFalse(backend.is_running)
         self.assertIsNone(backend._engine)
 
-    @patch("forgeai.core.backends.llamacpp_backend.console")
-    def test_llamacpp_backend_shutdown_close(self, mock_console) -> None:
-        """Verify that LlamaCppBackend.shutdown closes the C++ engine handle."""
-        settings = DevToolSettings(model_name="dummy-model.gguf")
-        backend = LlamaCppBackend(settings)
-        mock_engine = MagicMock()
-        backend._engine = mock_engine
-        backend._is_running = True
 
-        backend.shutdown()
-
-        # Check close was called on engine
-        mock_engine.close.assert_called_once()
-        self.assertFalse(backend.is_running)
-        self.assertIsNone(backend._engine)
 
     def test_autotuning_model_weight_subtraction(self) -> None:
         """Verify autotuning VRAM recommendation correctly estimates model footprint and clamps it."""
@@ -218,50 +200,7 @@ class ArchitecturePatchesTests(unittest.TestCase):
 
         asyncio.run(run_test())
 
-    def test_llamacpp_backend_streaming_disconnect_reclamation(self) -> None:
-        """Verify that early stream cancellation sets stop_event and shuts down the producer thread."""
-        import threading
-        settings = DevToolSettings(model_name="dummy.gguf")
-        backend = LlamaCppBackend(settings)
-        backend._is_running = True
 
-        # Infinite loop generator mock for self._engine
-        def mock_engine_infinite(*args, **kwargs):
-            while True:
-                yield {"choices": [{"text": "token"}]}
-
-        backend._engine = mock_engine_infinite
-
-        # Track the created producer thread
-        created_threads = []
-        original_thread = threading.Thread
-
-        def mock_thread_init(*args, **kwargs):
-            target = kwargs.get("target")
-            t = original_thread(*args, **kwargs)
-            if target and "producer" in getattr(target, "__name__", ""):
-                created_threads.append(t)
-            return t
-
-        async def run_test():
-            # Consume only 1 token and exit
-            stream = backend.generate_stream("prompt")
-            try:
-                async for token in stream:
-                    self.assertEqual(token, "token")
-                    break
-            finally:
-                await stream.aclose()
-
-            self.assertEqual(len(created_threads), 1)
-            producer_thread = created_threads[0]
-            # Wait for the producer thread to cleanly exit
-            producer_thread.join(timeout=2.0)
-            # Verify that the thread is not alive (it has cleanly exited!)
-            self.assertFalse(producer_thread.is_alive())
-
-        with patch("threading.Thread", side_effect=mock_thread_init):
-            asyncio.run(run_test())
 
 
 if __name__ == "__main__":

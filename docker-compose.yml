@@ -1,0 +1,33 @@
+services:
+  forgeai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: forgeai:2.0.0
+    container_name: forgeai-daemon
+    restart: unless-stopped
+    ipc: host
+    ports:
+      - "11434:11434"
+    environment:
+      - FORGEAI_HOST=0.0.0.0
+      - FORGEAI_PORT=11434
+      - FORGEAI_TELEMETRY_ENABLED=false
+      - HF_HOME=/root/.cache/huggingface
+      - FORGEAI_HOME=/root/.forgeai
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+      - forgeai-cache:/root/.forgeai
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  hf-cache:
+    name: forgeai-hf-cache
+  forgeai-cache:
+    name: forgeai-registry-cache

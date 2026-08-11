@@ -95,7 +95,7 @@ def _find_weight_files(path: Path) -> list[Path]:
     if path.is_file():
         return [path]
 
-    extensions = {".safetensors", ".bin", ".pt", ".pth", ".gguf"}
+    extensions = {".safetensors", ".bin", ".pt", ".pth"}
     files: list[Path] = []
     for ext in extensions:
         files.extend(path.rglob(f"*{ext}"))
@@ -118,8 +118,6 @@ def _scan_single_file(file_path: Path, result: ScanResult) -> None:
         _scan_safetensors(file_path, result)
     elif file_path.suffix in (".bin", ".pt", ".pth"):
         _scan_pytorch(file_path, result)
-    elif file_path.suffix == ".gguf":
-        _scan_gguf(file_path, result)
 
 
 def _scan_safetensors(file_path: Path, result: ScanResult) -> None:
@@ -255,15 +253,7 @@ def _scan_pytorch(file_path: Path, result: ScanResult) -> None:
         result.warnings.append(f"Error scanning {file_path.name}: {e}")
 
 
-def _scan_gguf(file_path: Path, result: ScanResult) -> None:
-    """Scan a GGUF file header."""
-    try:
-        with open(file_path, "rb") as f:
-            magic = f.read(4)
-            if magic != b"GGUF":
-                result.warnings.append(f"Invalid GGUF magic in {file_path.name}")
-    except Exception as e:
-        result.warnings.append(f"Error scanning {file_path.name}: {e}")
+
 
 
 def _to_dict(result: ScanResult) -> dict[str, Any]:

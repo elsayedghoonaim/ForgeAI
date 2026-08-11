@@ -4,7 +4,7 @@ Privacy-preserving, opt-in analytics.
 Collects ZERO prompts or output data. Only tracks:
 - Command invocations (which CLI command was run)
 - Model names used
-- Backend types (vllm vs llama.cpp)
+- Backend types (vllm)
 - Error types (not content)
 
 Disabled by default. Enable via FORGEAI_TELEMETRY_ENABLED=true.

@@ -15,14 +15,19 @@ def _required_permission(method: str, path: str) -> str:
     """Map paths to required permissions. Defaults to 'admin' (fail-closed)."""
     if path == "/metrics":
         return "monitoring"
-    if method == "POST" and path == "/v1/chat/completions":
+    if path in ("/api/generate", "/api/chat", "/api/embed") or (
+        method == "POST" and path == "/v1/chat/completions"
+    ):
         return "inference"
-    if method == "GET" and path.startswith("/v1/models"):
+    if path in ("/api/tags", "/api/show", "/api/ps", "/api/version") or (
+        method == "GET" and path.startswith("/v1/models")
+    ):
         return "models"
+    if path in ("/api/pull", "/api/delete"):
+        return "admin"
 
     # Fail-closed default: require top administrative privileges for any unrecognized path
     return "admin"
-
 
 
 def _request_id(request: Request) -> tuple[str, str]:
@@ -45,6 +50,14 @@ def _json_error(
     merged_headers = {header_name: request_id}
     if headers:
         merged_headers.update(headers)
+
+    if request.url.path.startswith("/api/"):
+        return JSONResponse(
+            status_code=status_code,
+            headers=merged_headers,
+            content={"error": message},
+        )
+
     return JSONResponse(
         status_code=status_code,
         headers=merged_headers,
@@ -56,6 +69,7 @@ def _json_error(
             }
         },
     )
+
 
 
 def _audit(

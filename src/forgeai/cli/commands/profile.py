@@ -13,21 +13,42 @@ from rich.table import Table
 console = Console()
 app = typer.Typer()
 
+ALLOWED_SAVED_KV_DTYPES: set[str] = {"auto", "fp8", "turboquant_k8v4", "turboquant_4bit_nc"}
+
 
 @app.command("save")
 def save_profile(
     name: str = typer.Argument(..., help="Profile name"),
     model: str = typer.Option("", "--model", help="Model name"),
     tp: int = typer.Option(1, "--tp", help="Tensor parallel size"),
-    gpu_util: float = typer.Option(0.90, "--gpu-util", help="GPU utilization"),
+    gpu_util: float = typer.Option(0.85, "--gpu-util", help="GPU utilization"),
     max_model_len: int | None = typer.Option(None, "--max-model-len", help="Max context length"),
-    max_num_seqs: int = typer.Option(256, "--max-num-seqs", help="Max concurrent sequences"),
-    host: str = typer.Option("0.0.0.0", "--host", help="Server host"),
-    port: int = typer.Option(8000, "--port", help="Server port"),
+    max_num_seqs: int = typer.Option(4, "--max-num-seqs", help="Max concurrent sequences"),
+    host: str = typer.Option("127.0.0.1", "--host", help="Server host"),
+    port: int = typer.Option(11434, "--port", help="Server port"),
+    kv_cache_dtype: str = typer.Option(
+        "auto",
+        "--kv-cache-dtype",
+        help="KV-cache dtype profile (auto, fp8, turboquant_k8v4, turboquant_4bit_nc)",
+    ),
 ) -> None:
     """Save a reproducible deployment profile."""
+    from forgeai import __version__
     from forgeai.core.config import DevToolSettings
     from forgeai.utils.helpers import save_yaml
+
+    kv_lower = kv_cache_dtype.lower().strip()
+    if kv_lower == "turboquant_3bit_nc":
+        console.print(
+            "[red]✗ Error:[/red] Profile 'turboquant_3bit_nc' is an aggressive POC-only profile and cannot be saved in deployment profiles."
+        )
+        raise typer.Exit(code=1)
+
+    if kv_lower not in ALLOWED_SAVED_KV_DTYPES:
+        console.print(
+            f"[red]✗ Error:[/red] Invalid --kv-cache-dtype '{kv_cache_dtype}'. Allowed options: {', '.join(sorted(ALLOWED_SAVED_KV_DTYPES))}"
+        )
+        raise typer.Exit(code=1)
 
     settings = DevToolSettings()
     profile_dir = Path(settings.profiles_dir)
@@ -35,8 +56,15 @@ def save_profile(
 
     profile_data = {
         "name": name,
-        "version": "1.1.0",
-        "model": {"name": model, "max_model_len": max_model_len, "max_num_seqs": max_num_seqs},
+        "version": __version__,
+        "model": {
+            "name": model,
+            "max_model_len": max_model_len,
+            "max_num_seqs": max_num_seqs,
+        },
+        "kv_cache": {
+            "dtype": kv_lower,
+        },
         "gpu": {"tensor_parallel_size": tp, "gpu_memory_utilization": gpu_util},
         "server": {"host": host, "port": port},
     }
@@ -63,6 +91,7 @@ def load_profile(
     data = load_yaml(filepath)
     console.print(f"\n[bold cyan]Profile: {name}[/bold cyan]")
     import yaml
+
     console.print(yaml.dump(data, default_flow_style=False))
 
 
@@ -90,6 +119,7 @@ def list_profiles() -> None:
 
     for p in sorted(profiles):
         from forgeai.utils.helpers import format_bytes
+
         table.add_row(p.stem, format_bytes(p.stat().st_size), str(p))
 
     console.print(table)

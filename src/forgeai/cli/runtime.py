@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 from dataclasses import dataclass
+from typing import Any, Generator, NoReturn
 
+import httpx
+import typer
 from rich.console import Console
 
 from forgeai.utils.gpu import (
@@ -17,6 +21,190 @@ from forgeai.utils.gpu import (
 )
 
 console = Console()
+
+
+class DaemonClientError(Exception):
+    """Stable CLI-facing exception for daemon client interactions."""
+
+    pass
+
+
+def _parse_and_validate_port(port_val: Any, source_name: str) -> int:
+    """Validate and convert port value to an integer between 1 and 65535."""
+    try:
+        p = int(port_val)
+    except (ValueError, TypeError) as err:
+        raise DaemonClientError(
+            f"Invalid port number {port_val!r} from {source_name}. Must be an integer between 1 and 65535."
+        ) from err
+    if not (1 <= p <= 65535):
+        raise DaemonClientError(
+            f"Port number {p} from {source_name} out of valid range (1-65535)."
+        )
+    return p
+
+
+def resolve_base_url(
+    host: str | None = None,
+    port: int | None = None,
+    base_url: str | None = None,
+) -> str:
+    """
+    Resolve base URL for local daemon.
+    Defaults to http://127.0.0.1:11434, overridable by CLI parameters,
+    FORGEAI_HOST / FORGEAI_PORT or forgeai_host / forgeai_port.
+    """
+    if base_url:
+        url = base_url.strip().rstrip("/")
+        if not (url.startswith("http://") or url.startswith("https://")):
+            url = f"http://{url}"
+        return url
+
+    # 1. Check explicit CLI port option
+    validated_cli_port: int | None = None
+    if port is not None:
+        validated_cli_port = _parse_and_validate_port(port, "CLI option")
+
+    # 2. Determine raw host
+    raw_host = host
+    if raw_host is None:
+        raw_host = os.getenv("FORGEAI_HOST") or os.getenv("forgeai_host")
+
+    # 3. Parse scheme and embedded port from host string if present
+    embedded_port: int | None = None
+    if raw_host:
+        h = raw_host.strip().rstrip("/")
+        scheme = "http"
+        if h.startswith("http://"):
+            scheme = "http"
+            h = h[7:]
+        elif h.startswith("https://"):
+            scheme = "https"
+            h = h[8:]
+
+        if ":" in h and not h.endswith("]"):
+            hostname, host_port_str = h.rsplit(":", 1)
+            if host_port_str.isdigit():
+                embedded_port = _parse_and_validate_port(host_port_str, "host parameter")
+                h = hostname
+    else:
+        scheme = "http"
+        h = "127.0.0.1"
+
+    # 4. Determine final port priority: CLI port > host-embedded port > environment port > default 11434
+    if validated_cli_port is not None:
+        final_port = validated_cli_port
+    elif embedded_port is not None:
+        final_port = embedded_port
+    else:
+        env_port = os.getenv("FORGEAI_PORT") or os.getenv("forgeai_port")
+        if env_port is not None:
+            final_port = _parse_and_validate_port(env_port, "environment variable")
+        else:
+            final_port = 11434
+
+    return f"{scheme}://{h}:{final_port}"
+
+
+class DaemonClient:
+    """
+    Client for interacting with the local Ollama-compatible daemon.
+    """
+
+    def __init__(
+        self,
+        base_url: str | None = None,
+        host: str | None = None,
+        port: int | None = None,
+        timeout: float = 30.0,
+    ) -> None:
+        self.base_url = resolve_base_url(host=host, port=port, base_url=base_url)
+        self.timeout = httpx.Timeout(connect=5.0, read=timeout, write=timeout, pool=5.0)
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        json_data: Any = None,
+        params: Any = None,
+    ) -> dict[str, Any]:
+        """Make an ordinary JSON HTTP request and return parsed JSON."""
+        url = f"{self.base_url}{path if path.startswith('/') else '/' + path}"
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                response = client.request(method, url, json=json_data, params=params)
+                if response.status_code >= 400:
+                    try:
+                        err_json = response.json()
+                        if isinstance(err_json, dict) and "error" in err_json:
+                            raise DaemonClientError(str(err_json["error"]))
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        pass
+                    raise DaemonClientError(f"HTTP {response.status_code}: {response.text.strip()}")
+
+                try:
+                    return response.json()
+                except Exception as err:
+                    raise DaemonClientError(f"Malformed JSON response from daemon: {err}") from err
+        except DaemonClientError:
+            raise
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError, httpx.RequestError) as err:
+            raise DaemonClientError(
+                f"Could not connect to daemon at {self.base_url}. Is the server running? Start it with: forgeai serve"
+            ) from err
+        except Exception as err:
+            raise DaemonClientError(f"HTTP request failed: {err}") from err
+
+    def stream(
+        self,
+        method: str,
+        path: str,
+        json_data: Any = None,
+        params: Any = None,
+    ) -> Generator[dict[str, Any], None, None]:
+        """Stream NDJSON response line-by-line without buffering the whole response."""
+        url = f"{self.base_url}{path if path.startswith('/') else '/' + path}"
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                with client.stream(method, url, json=json_data, params=params) as response:
+                    if response.status_code >= 400:
+                        body = response.read().decode("utf-8", errors="replace")
+                        try:
+                            err_json = json.loads(body)
+                            if isinstance(err_json, dict) and "error" in err_json:
+                                raise DaemonClientError(str(err_json["error"]))
+                        except (json.JSONDecodeError, TypeError, ValueError):
+                            pass
+                        raise DaemonClientError(f"HTTP {response.status_code}: {body.strip()}")
+
+                    for line in response.iter_lines():
+                        if not line or not line.strip():
+                            continue
+                        try:
+                            item = json.loads(line)
+                        except Exception as err:
+                            raise DaemonClientError(f"Malformed NDJSON chunk: {err}") from err
+
+                        if isinstance(item, dict) and "error" in item:
+                            raise DaemonClientError(str(item["error"]))
+
+                        yield item
+        except DaemonClientError:
+            raise
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError, httpx.RequestError) as err:
+            raise DaemonClientError(
+                f"Could not connect to daemon at {self.base_url}. Is the server running? Start it with: forgeai serve"
+            ) from err
+        except Exception as err:
+            raise DaemonClientError(f"HTTP stream failed: {err}") from err
+
+
+def handle_cli_error(err: Any) -> NoReturn:
+    """Print concise error message to stderr and exit with code 1."""
+    err_console = Console(stderr=True)
+    err_console.print(f"Error: {err}")
+    raise typer.Exit(code=1)
+
 
 CHAT_MAX_NUM_SEQS_ENV = "forgeai_MAX_NUM_SEQS"
 CHAT_MAX_MODEL_LEN_ENV = "forgeai_MAX_MODEL_LEN"

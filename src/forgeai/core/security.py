@@ -11,6 +11,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from typing import Any
+
 from packaging.version import InvalidVersion, Version
 from rich.console import Console
 
@@ -19,10 +21,74 @@ console = Console()
 # Minimum safe vLLM version
 MIN_VLLM_VERSION = "0.14.0"
 
+# Exact pinned vLLM version for runtime engine enforcement
+REQUIRED_VLLM_VERSION = "0.22.1"
+
 
 def _parse_version(version_str: str) -> Version:
     """Parse a version string into a Version object."""
     return Version(version_str)
+
+
+def check_required_vllm_version(
+    required_version: str = REQUIRED_VLLM_VERSION,
+    *,
+    vllm_module: Any = None,
+    announce_success: bool = True,
+) -> bool:
+    """
+    Check that the installed vLLM version strictly matches the required version.
+
+    Raises RuntimeError if:
+    - vLLM is not installed
+    - The vLLM version cannot be determined or does not equal required_version (0.22.1)
+
+    Returns True if installed vLLM version matches required_version.
+    """
+    if vllm_module is False:
+        raise RuntimeError(
+            f"vLLM is not installed. Exact version required: {required_version}.\n"
+            f"Install with: pip install 'vllm=={required_version}'"
+        )
+
+    if vllm_module is None:
+        try:
+            import vllm
+
+            vllm_module = vllm
+        except ImportError as err:
+            raise RuntimeError(
+                f"vLLM is not installed. Exact version required: {required_version}.\n"
+                f"Install with: pip install 'vllm=={required_version}'"
+            ) from err
+
+    installed = getattr(vllm_module, "__version__", None)
+    if installed is None:
+        raise RuntimeError(
+            f"Cannot determine vLLM version. Exact version required: {required_version}."
+        )
+
+    try:
+        installed_ver = _parse_version(str(installed))
+        req_ver = _parse_version(str(required_version))
+    except InvalidVersion as ev:
+        raise RuntimeError(
+            f"Invalid vLLM version string format: {installed!r}. Details: {ev}"
+        ) from ev
+
+    if installed_ver.public != req_ver.public:
+        raise RuntimeError(
+            f"SECURITY / CONTRACT: ForgeAI requires exact vLLM version {required_version}, "
+            f"but found {installed}.\n"
+            f"Remediation: pip install 'vllm=={required_version}'"
+        )
+
+    if announce_success:
+        console.print(
+            f"[green]✓[/green] vLLM exact version check passed: {installed} == {required_version}"
+        )
+    return True
+
 
 
 def check_vllm_version(

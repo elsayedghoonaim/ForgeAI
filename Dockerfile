@@ -1,61 +1,33 @@
 # ============================================================
-# ForgeAI - Production Docker Image (dual-backend)
-# Base: NVIDIA CUDA 12.4.0 Runtime (Ubuntu 22.04)
+# ForgeAI - Production Docker Image (NVIDIA vLLM-only)
+# Base: Official vLLM OpenAI image (v0.22.1)
+# Note: For production deployments, operators should resolve and pin
+# VLLM_IMAGE to an immutable RepoDigest (e.g. vllm/vllm-openai@sha256:...)
 # ============================================================
 
-ARG BACKEND=all
-FROM nvidia/cuda:12.4.0-devel-ubuntu22.04 AS builder
+ARG VLLM_IMAGE=vllm/vllm-openai:v0.22.1
+FROM ${VLLM_IMAGE}
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
-ENV PIP_NO_CACHE_DIR=1
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    FORGEAI_TELEMETRY_ENABLED=false \
+    HF_HOME=/root/.cache/huggingface \
+    FORGEAI_HOME=/root/.forgeai
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 python3.11-dev python3-pip python3.11-venv git \
-    && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace
 
-RUN python3.11 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+# Copy ForgeAI packaging and source files
+COPY pyproject.toml README.md ./
+COPY src/ src/
 
-WORKDIR /build
-COPY requirements/ requirements/
-RUN pip install --upgrade pip setuptools wheel \
-    && pip install -r requirements/base.txt
+# Install ForgeAI base package and non-vLLM runtime dependencies (vllm==0.22.1 is pre-installed in upstream base)
+RUN pip install --no-build-isolation .
 
-ARG BACKEND
-RUN if [ "$BACKEND" = "vllm" ] || [ "$BACKEND" = "all" ]; then \
-        pip install 'vllm>=0.14.0'; \
-    fi \
-    && if [ "$BACKEND" = "llamacpp" ] || [ "$BACKEND" = "all" ]; then \
-        CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python; \
-    fi
-
-COPY . .
-RUN pip install --no-deps .
-
-FROM nvidia/cuda:12.4.0-runtime-ubuntu22.04
-
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
-ENV FORGEAI_TELEMETRY_ENABLED=false
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 python3.11-venv \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /opt/venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-
-RUN useradd -m -s /bin/bash forgeai
-USER forgeai
-WORKDIR /home/forgeai
-
-ENV HF_HOME=/home/forgeai/.cache/huggingface
-
-EXPOSE 8000
+EXPOSE 11434
 
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
-    CMD python3.11 -c "import httpx; r = httpx.get('http://localhost:8000/healthz'); assert r.status_code == 200"
+    CMD python3 -c "import httpx; r = httpx.get('http://localhost:11434/healthz'); assert r.status_code == 200"
 
-ENTRYPOINT ["forgeai"]
-CMD ["--help"]
+ENTRYPOINT ["forgeai", "serve"]
+CMD ["--host", "0.0.0.0", "--port", "11434"]

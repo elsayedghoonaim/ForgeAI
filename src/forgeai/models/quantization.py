@@ -1,14 +1,13 @@
 """
-Auto-detection of quantization formats (AWQ, GPTQ, GGUF).
+Auto-detection of quantization formats (AWQ, GPTQ).
 
 Identifies quantization type from file signatures, config files,
-and file extensions to route models to the correct backend.
+and file extensions to route models to the vLLM backend.
 """
 
 from __future__ import annotations
 
 import json
-import struct
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,7 +16,6 @@ from rich.console import Console
 from forgeai.core.config import BackendType, QuantizationType
 
 console = Console()
-GGUF_MAGIC = b"GGUF"
 
 
 @dataclass
@@ -35,13 +33,13 @@ def detect_quantization(model_path: str) -> QuantizationInfo:
     """Auto-detect quantization format from files, config, or naming patterns."""
     path = Path(model_path)
 
-    # 1. GGUF file check
-    if path.is_file() and path.suffix == ".gguf":
-        return _detect_gguf(path)
-    if path.is_dir():
-        gguf_files = list(path.glob("*.gguf"))
-        if gguf_files:
-            return _detect_gguf(gguf_files[0])
+    # 1. GGUF file check rejection
+    if (path.is_file() and path.suffix.lower() == ".gguf") or (path.is_dir() and list(path.glob("*.gguf"))):
+        raise ValueError(
+            f"ERROR: GGUF model format is unsupported in ForgeAI v2.0+ (model: {model_path!r}). "
+            "llama.cpp has been removed in favor of vLLM. "
+            "Remediation: Specify a Hugging Face repo ID or local safetensors directory."
+        )
 
     # 2. config.json check
     config_path = path / "config.json" if path.is_dir() else path.parent / "config.json"
@@ -61,26 +59,6 @@ def detect_quantization(model_path: str) -> QuantizationInfo:
 
     return QuantizationInfo(format=QuantizationType.NONE, backend=BackendType.VLLM,
                             source="no quantization detected")
-
-
-def _detect_gguf(file_path: Path) -> QuantizationInfo:
-    info = QuantizationInfo(format=QuantizationType.GGUF, backend=BackendType.LLAMA_CPP,
-                            source="gguf file signature")
-    try:
-        with open(file_path, "rb") as f:
-            magic = f.read(4)
-            if magic == GGUF_MAGIC:
-                version = struct.unpack("<I", f.read(4))[0]
-                info.method = f"gguf_v{version}"
-        name = file_path.name.lower()
-        for pattern, bits in [("q4", 4), ("q5", 5), ("q8", 8), ("q3", 3), ("q2", 2), ("f16", 16)]:
-            if pattern in name:
-                info.bits = bits
-                info.method = f"gguf_{pattern}"
-                break
-    except (OSError, struct.error):
-        pass
-    return info
 
 
 def _detect_from_config(config_path: Path) -> QuantizationInfo | None:

@@ -19,7 +19,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install dependencies
         run: |
@@ -31,3 +31,17 @@ jobs:
 
       - name: Run tests
         run: python -m pytest tests -v --tb=short
+
+      - name: Residue guard checks
+        run: |
+          echo "Checking packaging and configuration for legacy llama.cpp/GGUF residue..."
+          if grep -iE 'llama-cpp-python|llamacpp|gguf_finder' pyproject.toml Dockerfile; then
+            echo "ERROR: Legacy backend artifact residue found in package/docker configuration!"
+            exit 1
+          fi
+          echo "Checking src/ for forbidden runtime import or class residue..."
+          if grep -rnE 'import llama_cpp|from llama_cpp|class LlamaCppBackend' src/; then
+            echo "ERROR: Legacy backend artifact residue found in src!"
+            exit 1
+          fi
+          echo "Residue guard checks passed successfully."

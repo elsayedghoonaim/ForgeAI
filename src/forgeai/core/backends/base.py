@@ -64,26 +64,33 @@ class BaseBackend(ABC):
         temperature: float = 0.7,
         top_p: float = 0.95,
         stop: list[str] | None = None,
+        top_k: int | None = None,
     ) -> GenerationResult:
         """Run a single asynchronous generation."""
         pass
 
     @abstractmethod
-    async def generate_stream(
+    def generate_stream(
         self,
         prompt: str,
         max_tokens: int | None = None,
         temperature: float = 0.7,
         top_p: float = 0.95,
         stop: list[str] | None = None,
+        top_k: int | None = None,
     ) -> AsyncIterator[str]:
         """Run an asynchronous generation that yields string deltas."""
         pass
+
 
     @abstractmethod
     def build_prompt(self, messages: list[dict[str, str]]) -> str:
         """Format a list of chat messages into a single prompt string."""
         pass
+
+    async def embed(self, input_texts: list[str]) -> list[list[float]]:
+        """Generate vector embeddings for input texts."""
+        raise NotImplementedError("Embedding is not supported by this backend.")
 
     @abstractmethod
     def shutdown(self) -> None:
@@ -100,3 +107,4 @@ class BaseBackend(ABC):
     def supports_streaming(self) -> bool:
         """Return True if this backend natively supports streaming."""
         pass
+
