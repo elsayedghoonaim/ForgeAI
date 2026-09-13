@@ -74,7 +74,7 @@ def _error_response(
 def create_app(
     engine: Any = None,
     title: str = "ForgeAI API",
-    enable_cors: bool = True,
+    enable_cors: bool = False,
     enable_auth: bool = False,
     auth_manager: Any = None,
     settings: Any = None,
@@ -91,7 +91,8 @@ def create_app(
     Args:
         engine: DevToolEngine instance to serve (legacy).
         title: API title.
-        enable_cors: Enable CORS middleware.
+        enable_cors: Enable CORS middleware. Disabled by default to prevent
+            untrusted browser origins from accessing a local ForgeAI daemon.
         enable_auth: Enable authentication middleware.
         auth_manager: Authentication manager used by the middleware.
         settings: Runtime settings object.

@@ -27,17 +27,16 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install pip-audit safety
-          pip install ".[all]"
-          pip uninstall -y forgeai
+          python -m pip install --upgrade pip
+          python -m pip install pip-audit
+          python -m pip install ".[all]"
+          python -m pip uninstall -y forgeai
+
+      - name: Validate dependency graph
+        run: python -m pip check
 
       - name: Run pip-audit
-        run: pip-audit --strict --desc --ignore-vuln CVE-2025-69872 --ignore-vuln PYSEC-2026-161
-
-      - name: Run safety check
-        run: safety check --full-report -i 86338,73285
-        continue-on-error: true
+        run: pip-audit --strict --desc
 
   codeql:
     name: CodeQL Analysis

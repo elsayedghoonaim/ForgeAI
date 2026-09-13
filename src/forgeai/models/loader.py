@@ -135,28 +135,117 @@ class CacheManager:
 
         return None
 
+    def _remove_rejected_snapshot(self, local_path: Path) -> None:
+        """Best-effort cleanup of a rejected snapshot contained by HF_HOME."""
+        try:
+            resolved = local_path.resolve()
+            hf_root = self.hf_home.resolve()
+            if not resolved.is_relative_to(hf_root):
+                return
+
+            import shutil
+
+            if local_path.is_symlink():
+                local_path.unlink()
+            elif local_path.is_dir():
+                shutil.rmtree(local_path)
+            elif local_path.exists():
+                local_path.unlink()
+        except Exception:
+            pass
+
+    def _validate_snapshot_security(
+        self,
+        local_path: str | Path,
+        repo_id: str,
+        *,
+        enable_safety_scan: bool = True,
+    ) -> str:
+        """Validate a downloaded/cached model snapshot before any caller may use it."""
+        path = Path(local_path).expanduser().resolve()
+
+        try:
+            if not path.exists():
+                raise ValueError(
+                    f"SECURITY BLOCK: Model safety scan failed for {repo_id}. "
+                    "Downloaded snapshot path does not exist."
+                )
+
+            files = [path] if path.is_file() else [p for p in path.rglob("*") if p.is_file()]
+            unsafe_suffixes = {".bin", ".pt", ".pth", ".ckpt"}
+            unsafe_weights = [p for p in files if p.suffix.lower() in unsafe_suffixes]
+            if unsafe_weights:
+                names = ", ".join(sorted(p.name for p in unsafe_weights[:5]))
+                raise ValueError(
+                    f"SECURITY BLOCK: Model safety scan failed for {repo_id}. "
+                    "Pickle-backed model weights are not permitted. "
+                    f"Found: {names}. Use safetensors-only model artifacts."
+                )
+
+            safetensors = [p for p in files if p.suffix.lower() == ".safetensors"]
+            if not safetensors:
+                raise ValueError(
+                    f"SECURITY BLOCK: Model safety scan failed for {repo_id}. "
+                    "Snapshot contains no .safetensors model weights."
+                )
+
+            if enable_safety_scan:
+                try:
+                    from forgeai.models.safety_scanner import scan_model_weights
+
+                    scan_result = scan_model_weights(str(path))
+                except Exception as err:
+                    raise ValueError(
+                        f"SECURITY BLOCK: Model safety scan failed for {repo_id}. "
+                        f"Scanner error: {err}"
+                    ) from err
+
+                if not scan_result.get("safe", False):
+                    raise ValueError(
+                        f"SECURITY BLOCK: Model safety scan failed for {repo_id}. "
+                        f"Reason: {scan_result.get('reason', 'Unknown')}"
+                    )
+
+            return str(path)
+        except Exception:
+            self._remove_rejected_snapshot(path)
+            raise
+
     def download_snapshot(
         self,
         repo_id: str,
         revision: str = "main",
         token: str | None = None,
+        *,
+        enable_safety_scan: bool = True,
     ) -> str:
         """
-        Download snapshot using Hugging Face snapshot_download.
-        Reuses existing snapshot if repo_id/revision is already present in canonical HF cache.
+        Download and validate a Hugging Face snapshot.
+
+        Every caller, including the API pull route, passes through the same
+        fail-closed format policy and safety scanner. Existing cached snapshots
+        are revalidated before reuse.
         """
         validate_repo_id_string(repo_id)
 
         existing = self.get_snapshot_path(repo_id, revision)
         if existing and existing.exists():
-            return str(existing)
+            return self._validate_snapshot_security(
+                existing,
+                repo_id,
+                enable_safety_scan=enable_safety_scan,
+            )
 
         lock_path = self.locks_dir / f"{self._repo_to_dir_name(repo_id)}.lock"
 
         with _acquire_file_lock(lock_path):
             existing = self.get_snapshot_path(repo_id, revision)
             if existing and existing.exists():
-                return str(existing)
+                return self._validate_snapshot_security(
+                    existing,
+                    repo_id,
+                    enable_safety_scan=enable_safety_scan,
+                )
 
             try:
                 from huggingface_hub import snapshot_download
@@ -176,7 +265,11 @@ class CacheManager:
                 ignore_patterns=["*.md", "*.txt", "LICENSE*", ".git*"],
             )
 
-            return str(local_path)
+            return self._validate_snapshot_security(
+                local_path,
+                repo_id,
+                enable_safety_scan=enable_safety_scan,
+            )
 
     async def pull_snapshot(
         self,
@@ -184,7 +277,7 @@ class CacheManager:
         revision: str = "main",
         token: str | None = None,
     ) -> str:
-        """Async wrapper for download_snapshot."""
+        """Async wrapper for the secure download_snapshot path."""
         return await asyncio.to_thread(self.download_snapshot, repo_id, revision, token)
 
     def garbage_collect_unreferenced(self, active_snapshots: list[str]) -> int:
@@ -296,7 +389,8 @@ def download_model(
         cache_dir: Local cache directory.
         revision: Specific model revision/branch.
         token: HuggingFace API token for private models.
-        enable_safety_scan: Run safety scanner after download.
+        enable_safety_scan: Run safety scanner after download. Unsafe weight formats
+            remain blocked even when scanner execution is disabled.
 
     Returns:
         Local path to the downloaded model.
@@ -316,41 +410,19 @@ def download_model(
     if revision:
         console.print(f"  Revision: {revision}")
 
-    local_path = manager.download_snapshot(repo_id, revision=revision or "main", token=token)
-
-    console.print(f"\n[green]✓[/green] Model saved to: {local_path}")
-
     if enable_safety_scan:
         console.print("\n[bold]Running safety scan...[/bold]")
-        try:
-            from forgeai.models.safety_scanner import scan_model_weights
 
-            scan_result = scan_model_weights(local_path)
-            if scan_result["safe"]:
-                console.print("[green]✓[/green] Safety scan passed")
-            else:
-                console.print(
-                    f"[red]✗[/red] Safety scan flagged issues:\n"
-                    f"  {scan_result.get('reason', 'Unknown')}"
-                )
-                try:
-                    import shutil
+    local_path = manager.download_snapshot(
+        repo_id,
+        revision=revision or "main",
+        token=token,
+        enable_safety_scan=enable_safety_scan,
+    )
 
-                    if os.path.isdir(local_path):
-                        shutil.rmtree(local_path)
-                    elif os.path.isfile(local_path):
-                        os.remove(local_path)
-                except Exception:
-                    pass
-
-                raise ValueError(
-                    f"SECURITY BLOCK: Model safety scan failed for {repo_id}. "
-                    f"Reason: {scan_result.get('reason', 'Unknown')}"
-                )
-        except ValueError:
-            raise
-        except Exception as e:
-            console.print(f"[yellow]⚠ Safety scan skipped: {e}[/yellow]")
+    console.print(f"\n[green]✓[/green] Model saved to: {local_path}")
+    if enable_safety_scan:
+        console.print("[green]✓[/green] Safety scan passed")
 
     return local_path
 

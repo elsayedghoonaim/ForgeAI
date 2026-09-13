@@ -1,7 +1,7 @@
 """
 Runtime security enforcement.
 
-- Blocks vLLM versions < 0.14.0 (CVE-2026-22807)
+- Enforces the current ForgeAI vLLM security baseline
 - Sanitizes file paths to prevent traversal attacks
 - Validates tensor parallelism settings
 """
@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-
 from typing import Any
 
 from packaging.version import InvalidVersion, Version
@@ -18,11 +17,12 @@ from rich.console import Console
 
 console = Console()
 
-# Minimum safe vLLM version
-MIN_VLLM_VERSION = "0.14.0"
+# Current security baseline. Older releases have known vulnerabilities that are
+# relevant to long-running, multi-user inference services.
+MIN_VLLM_VERSION = "0.29.0"
 
-# Exact pinned vLLM version for runtime engine enforcement
-REQUIRED_VLLM_VERSION = "0.22.1"
+# Exact pinned vLLM version for runtime engine enforcement.
+REQUIRED_VLLM_VERSION = "0.29.0"
 
 
 def _parse_version(version_str: str) -> Version:
@@ -41,7 +41,7 @@ def check_required_vllm_version(
 
     Raises RuntimeError if:
     - vLLM is not installed
-    - The vLLM version cannot be determined or does not equal required_version (0.22.1)
+    - The vLLM version cannot be determined or does not equal required_version
 
     Returns True if installed vLLM version matches required_version.
     """
@@ -90,7 +90,6 @@ def check_required_vllm_version(
     return True
 
 
-
 def check_vllm_version(
     min_version: str = MIN_VLLM_VERSION,
     *,
@@ -111,8 +110,7 @@ def check_vllm_version(
         installed = getattr(vllm, "__version__", None)
         if installed is None:
             raise RuntimeError(
-                f"Cannot determine vLLM version. "
-                f"Minimum required: {min_version} (CVE-2026-22807)"
+                f"Cannot determine vLLM version. Minimum required: {min_version}"
             )
 
         try:
@@ -125,8 +123,12 @@ def check_vllm_version(
             ) from ev
 
         if installed_ver < min_ver:
+            if min_ver <= Version("0.14.0"):
+                reason = "is vulnerable to CVE-2026-22807"
+            else:
+                reason = "does not meet the ForgeAI security baseline"
             raise RuntimeError(
-                f"SECURITY: vLLM {installed} is vulnerable to CVE-2026-22807.\n"
+                f"SECURITY: vLLM {installed} {reason}.\n"
                 f"Minimum required version: {min_version}\n"
                 f"Upgrade with: pip install 'vllm>={min_version}'"
             )
@@ -182,7 +184,6 @@ def sanitize_path(path: str | Path, allowed_base: str | Path | None = None) -> P
             raise ValueError(f"Path traversal detected: {path!r}")
 
     return resolved
-
 
 
 def validate_parallelism(tensor_parallel_size: int, available_gpus: int) -> int:

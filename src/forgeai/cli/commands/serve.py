@@ -2,9 +2,22 @@
 
 from __future__ import annotations
 
+from ipaddress import ip_address
+
 import typer
 
 from forgeai.cli.runtime import handle_cli_error
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Return True only for loopback bind addresses/names."""
+    normalized = host.strip().lower().strip("[]")
+    if normalized == "localhost":
+        return True
+    try:
+        return ip_address(normalized).is_loopback
+    except ValueError:
+        return False
 
 
 def serve(
@@ -80,6 +93,12 @@ def serve(
         setup_logging(level=log_level, json_output=bootstrap_settings.log_json)
 
         auth_requested = enable_auth or bootstrap_settings.auth_enabled
+        if not auth_requested and not _is_loopback_host(host):
+            handle_cli_error(
+                "Refusing to bind ForgeAI to a non-loopback interface without authentication. "
+                "Use --auth and configure FORGEAI_AUTH_SECRET_KEY plus "
+                "FORGEAI_BOOTSTRAP_API_KEY."
+            )
 
         settings_kwargs: dict[str, object] = {
             "host": host,
@@ -104,9 +123,9 @@ def serve(
         auth_manager = None
         if auth_requested:
             if settings.auth_secret_key == "change-me-in-production":
-                handle_cli_error("auth is enabled but the secret key is still the default. Set forgeai_AUTH_SECRET_KEY before starting the server.")
+                handle_cli_error("auth is enabled but the secret key is still the default. Set FORGEAI_AUTH_SECRET_KEY before starting the server.")
             if not settings.bootstrap_api_key:
-                handle_cli_error("auth is enabled but no bootstrap API key is configured. Set forgeai_BOOTSTRAP_API_KEY before starting the server.")
+                handle_cli_error("auth is enabled but no bootstrap API key is configured. Set FORGEAI_BOOTSTRAP_API_KEY before starting the server.")
 
             auth_manager = AuthManager(
                 secret_key=settings.auth_secret_key,
