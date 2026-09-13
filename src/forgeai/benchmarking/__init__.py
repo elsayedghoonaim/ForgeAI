@@ -4,6 +4,8 @@ ForgeAI TurboQuant benchmarking harness package.
 Provides data schemas, profile definitions, pure evaluation gates, and hardware runner for TurboQuant POC.
 """
 
+from typing import Any
+
 from forgeai.benchmarking.runner import (
     PreflightResult,
     SequentialBenchmarkRunner,
@@ -17,6 +19,7 @@ from forgeai.benchmarking.runner import (
     process_streaming_response,
     run_preflight,
 )
+from forgeai.benchmarking import turboquant as _turboquant
 from forgeai.benchmarking.turboquant import (
     PROFILES_CATALOG,
     SCHEMA_VERSION,
@@ -34,9 +37,37 @@ from forgeai.benchmarking.turboquant import (
     ProfileResult,
     TurboQuantBenchmarkArtifact,
     create_benchmark_plan,
-    evaluate_artifact,
+    evaluate_artifact as _evaluate_artifact_raw,
     parse_cuda_compute_capability,
 )
+
+
+def evaluate_artifact(
+    artifact: TurboQuantBenchmarkArtifact | dict[str, Any] | str,
+) -> TurboQuantBenchmarkArtifact:
+    """Evaluate an artifact while preserving `not_run` for untouched plan templates.
+
+    A generated plan already contains profile shells, but none have measurements.
+    The core evaluator correctly marks its contract evidence incomplete; for an
+    unvalidated template this is not an attempted/partial run, so the overall
+    artifact status remains `not_run` as documented by the public contract.
+    """
+    evaluated = _evaluate_artifact_raw(artifact)
+    profiles = list(evaluated.profile_results.values())
+    untouched = not profiles or all(profile.measurements is None for profile in profiles)
+    if (
+        not evaluated.hardware_validation_performed
+        and untouched
+        and evaluated.status == STATUS_INCOMPLETE
+    ):
+        evaluated.status = STATUS_NOT_RUN
+    return evaluated
+
+
+# Direct imports from forgeai.benchmarking.turboquant should observe the same
+# public semantics as imports from this package.
+_turboquant.evaluate_artifact = evaluate_artifact
+
 
 __all__ = [
     "VLLM_PINNED_VERSION",
