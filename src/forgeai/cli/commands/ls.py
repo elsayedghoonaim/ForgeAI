@@ -47,11 +47,11 @@ def ls(
 
     table = Table(title="Registered Models", show_lines=True)
     table.add_column("NAME", style="cyan", no_wrap=True, overflow="ignore")
-    table.add_column("SIZE", justify="right")
-    table.add_column("MODIFIED")
-    table.add_column("FORMAT")
-    table.add_column("QUANTIZATION")
-    table.add_column("KV CACHE")
+    table.add_column("SIZE", justify="right", no_wrap=True)
+    table.add_column("MODIFIED", max_width=10)
+    table.add_column("FORMAT", min_width=11, no_wrap=True, overflow="ignore")
+    table.add_column("QUANT", no_wrap=True)
+    table.add_column("KV", no_wrap=True)
 
     for item in models:
         name = item.get("name", "")
