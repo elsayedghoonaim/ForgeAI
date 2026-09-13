@@ -8,7 +8,7 @@ from typing import Any, AsyncIterator
 
 from forgeai.core.config import DevToolSettings
 from forgeai.core.engine import EngineKey, EngineLease, EngineManager
-from forgeai.models.loader import CacheManager
+from forgeai.models.loader import CacheManager, SecureCacheManager
 from forgeai.models.manifest import ForgeAIManifest
 from forgeai.models.registry import ModelRecord, ModelRegistry, parse_tag
 
@@ -29,7 +29,20 @@ class SharedRuntimeAdapter:
         self.settings = settings or DevToolSettings()
         self.engine_manager = engine_manager or EngineManager(settings=self.settings)
         self.model_registry = model_registry or ModelRegistry()
-        self.cache_manager = cache_manager or CacheManager()
+
+        # API/runtime model acquisition must never use the raw cache primitive.
+        # Preserve explicit test/double implementations, while upgrading real
+        # CacheManager instances to the fail-closed secure variant.
+        if cache_manager is None:
+            self.cache_manager = SecureCacheManager()
+        elif type(cache_manager) is CacheManager:
+            self.cache_manager = SecureCacheManager(
+                forgeai_home=cache_manager.forgeai_home,
+                hf_home=cache_manager.hf_home,
+            )
+        else:
+            self.cache_manager = cache_manager
+
         self._key_to_tag: dict[EngineKey, str] = {}
 
     def resolve_tag(self, tag: str | None) -> str:
@@ -56,11 +69,7 @@ class SharedRuntimeAdapter:
     def build_engine_key(self, manifest: ForgeAIManifest, record: ModelRecord) -> EngineKey:
         """Construct deterministic EngineKey from manifest and record."""
         snapshot_path = record.snapshot_path
-        repo_id = (
-            snapshot_path
-            if snapshot_path and record.size_bytes > 0
-            else manifest.model
-        )
+        repo_id = snapshot_path if snapshot_path and record.size_bytes > 0 else manifest.model
 
         chat_template_digest = (
             hashlib.sha256(manifest.chat_template.encode("utf-8")).hexdigest()
@@ -68,7 +77,6 @@ class SharedRuntimeAdapter:
             else ""
         )
 
-        # Snapshot identity combines resolved snapshot path, revision, and manifest digest
         snapshot_identity = hashlib.sha256(
             f"{snapshot_path}:{manifest.revision}:{record.ref.digest}".encode("utf-8")
         ).hexdigest()
@@ -92,7 +100,6 @@ class SharedRuntimeAdapter:
             trust_remote_code=manifest.engine_settings.trust_remote_code,
             device_runtime_id="cuda:0",
         )
-
 
         self._key_to_tag[key] = record.ref.full_tag
         return key
