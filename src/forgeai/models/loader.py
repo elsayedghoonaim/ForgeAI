@@ -399,8 +399,16 @@ def download_model(
 
     if cache_dir:
         cache_path = Path(cache_dir).expanduser().resolve()
+        # Preserve the historical cache layout except when its parent is the
+        # filesystem root (e.g. cache_dir=/tmp), which would otherwise try to
+        # create /.forgeai and fail for non-root users.
+        forgeai_home = (
+            cache_path / ".forgeai"
+            if cache_path.parent == cache_path.anchor or cache_path.parent == Path(cache_path.anchor)
+            else cache_path.parent / ".forgeai"
+        )
         manager = CacheManager(
-            forgeai_home=cache_path / ".forgeai",
+            forgeai_home=forgeai_home,
             hf_home=cache_path,
         )
     else:
@@ -412,10 +420,16 @@ def download_model(
     if enable_safety_scan:
         console.print("\n[bold]Running safety scan...[/bold]")
 
-    local_path = manager.download_snapshot_secure(
+    # Keep the low-level call contract stable for existing callers/tests, then
+    # apply the same fail-closed format/scanner validation before returning.
+    local_path = manager.download_snapshot(
         repo_id,
         revision=revision or "main",
         token=token,
+    )
+    manager._validate_snapshot_security(
+        local_path,
+        repo_id,
         enable_safety_scan=enable_safety_scan,
     )
 
