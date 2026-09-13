@@ -32,7 +32,7 @@ def ps(
         return
 
     table = Table(title="Running Models", show_lines=True)
-    table.add_column("NAME", style="cyan")
+    table.add_column("NAME", style="cyan", no_wrap=True, overflow="ignore")
     table.add_column("EXPIRATION")
     table.add_column("VRAM", justify="right")
     table.add_column("FORMAT")
