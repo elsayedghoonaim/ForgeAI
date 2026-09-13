@@ -46,7 +46,7 @@ def ls(
         return
 
     table = Table(title="Registered Models", show_lines=True)
-    table.add_column("NAME", style="cyan")
+    table.add_column("NAME", style="cyan", no_wrap=True, overflow="ignore")
     table.add_column("SIZE", justify="right")
     table.add_column("MODIFIED")
     table.add_column("FORMAT")
