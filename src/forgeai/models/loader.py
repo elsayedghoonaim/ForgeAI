@@ -22,15 +22,20 @@ console = Console()
 
 
 def _is_valid_repo_id(repo_id: str) -> bool:
-    """
-    Validate HuggingFace Hub repository ID format.
-    Returns True if valid, False otherwise.
-    """
+    """Return whether a Hugging Face repository identifier is safe and supported."""
+    if not repo_id or len(repo_id) > 200:
+        return False
     try:
         validate_repo_id_string(repo_id)
         return True
     except ValueError:
         return False
+
+
+def _validate_repo_id_or_raise(repo_id: str) -> None:
+    """Raise a stable public validation error for invalid repository IDs."""
+    if not _is_valid_repo_id(repo_id):
+        raise ValueError(f"Invalid HuggingFace repository ID format: {repo_id!r}")
 
 
 @contextmanager
@@ -68,8 +73,9 @@ class CacheManager:
     """
     Canonical Hugging Face cache manager rooted at FORGEAI_HOME.
 
-    Manages canonical HF_HOME=${FORGEAI_HOME}/hf, file locks under
-    ${FORGEAI_HOME}/locks, and partial temporary work under ${FORGEAI_HOME}/tmp.
+    `download_snapshot()` is intentionally a low-level cache primitive. Public
+    runtime/model acquisition must use `download_snapshot_secure()` (or
+    SecureCacheManager), which adds the fail-closed model safety policy.
     """
 
     def __init__(
@@ -113,7 +119,6 @@ class CacheManager:
         if not repo_dir.exists():
             return None
 
-        # Check ref pointer file
         ref_file = repo_dir / "refs" / revision
         if ref_file.exists() and ref_file.is_file():
             commit_hash = ref_file.read_text(encoding="utf-8").strip()
@@ -121,12 +126,10 @@ class CacheManager:
             if snap_path.exists() and snap_path.is_dir():
                 return snap_path
 
-        # Direct commit hash check
         direct_snap = repo_dir / "snapshots" / revision
         if direct_snap.exists() and direct_snap.is_dir():
             return direct_snap
 
-        # If snapshots dir has subdirectories, check if one matches
         snapshots_dir = repo_dir / "snapshots"
         if snapshots_dir.exists() and snapshots_dir.is_dir():
             snaps = [d for d in snapshots_dir.iterdir() if d.is_dir()]
@@ -161,7 +164,7 @@ class CacheManager:
         *,
         enable_safety_scan: bool = True,
     ) -> str:
-        """Validate a downloaded/cached model snapshot before any caller may use it."""
+        """Validate a model snapshot using the fail-closed runtime policy."""
         path = Path(local_path).expanduser().resolve()
 
         try:
@@ -216,36 +219,20 @@ class CacheManager:
         repo_id: str,
         revision: str = "main",
         token: str | None = None,
-        *,
-        enable_safety_scan: bool = True,
     ) -> str:
-        """
-        Download and validate a Hugging Face snapshot.
-
-        Every caller, including the API pull route, passes through the same
-        fail-closed format policy and safety scanner. Existing cached snapshots
-        are revalidated before reuse.
-        """
-        validate_repo_id_string(repo_id)
+        """Download/reuse a raw Hugging Face cache snapshot."""
+        _validate_repo_id_or_raise(repo_id)
 
         existing = self.get_snapshot_path(repo_id, revision)
         if existing and existing.exists():
-            return self._validate_snapshot_security(
-                existing,
-                repo_id,
-                enable_safety_scan=enable_safety_scan,
-            )
+            return str(existing)
 
         lock_path = self.locks_dir / f"{self._repo_to_dir_name(repo_id)}.lock"
 
         with _acquire_file_lock(lock_path):
             existing = self.get_snapshot_path(repo_id, revision)
             if existing and existing.exists():
-                return self._validate_snapshot_security(
-                    existing,
-                    repo_id,
-                    enable_safety_scan=enable_safety_scan,
-                )
+                return str(existing)
 
             try:
                 from huggingface_hub import snapshot_download
@@ -257,19 +244,31 @@ class CacheManager:
 
             os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
-            local_path = snapshot_download(
-                repo_id=repo_id,
-                cache_dir=str(self.hf_home),
-                revision=revision,
-                token=token,
-                ignore_patterns=["*.md", "*.txt", "LICENSE*", ".git*"],
+            return str(
+                snapshot_download(
+                    repo_id=repo_id,
+                    cache_dir=str(self.hf_home),
+                    revision=revision,
+                    token=token,
+                    ignore_patterns=["*.md", "*.txt", "LICENSE*", ".git*"],
+                )
             )
 
-            return self._validate_snapshot_security(
-                local_path,
-                repo_id,
-                enable_safety_scan=enable_safety_scan,
-            )
+    def download_snapshot_secure(
+        self,
+        repo_id: str,
+        revision: str = "main",
+        token: str | None = None,
+        *,
+        enable_safety_scan: bool = True,
+    ) -> str:
+        """Download/reuse and then validate a snapshot before runtime use."""
+        local_path = self.download_snapshot(repo_id, revision=revision, token=token)
+        return self._validate_snapshot_security(
+            local_path,
+            repo_id,
+            enable_safety_scan=enable_safety_scan,
+        )
 
     async def pull_snapshot(
         self,
@@ -277,19 +276,16 @@ class CacheManager:
         revision: str = "main",
         token: str | None = None,
     ) -> str:
-        """Async wrapper for the secure download_snapshot path."""
-        return await asyncio.to_thread(self.download_snapshot, repo_id, revision, token)
+        """Async wrapper for the secure model-acquisition path."""
+        return await asyncio.to_thread(
+            self.download_snapshot_secure,
+            repo_id,
+            revision,
+            token,
+        )
 
     def garbage_collect_unreferenced(self, active_snapshots: list[str]) -> int:
-        """
-        Remove unreferenced Hugging Face snapshot directories within the canonical hub.
-
-        Defensive safety rules:
-        - Never delete active/referenced snapshots.
-        - Never delete anything outside self.hub_dir.
-        - Never follow or delete outside symlink targets.
-        - Returns count of snapshot directories removed.
-        """
+        """Remove unreferenced Hugging Face snapshot directories within the canonical hub."""
         hub_resolved = self.hub_dir.resolve()
         if not hub_resolved.exists():
             return 0
@@ -299,13 +295,11 @@ class CacheManager:
             if not snap_str:
                 continue
             try:
-                p = Path(snap_str).resolve()
-                active_paths.add(p)
+                active_paths.add(Path(snap_str).resolve())
             except Exception:
                 pass
 
         removed_count = 0
-
         for model_dir in hub_resolved.glob("models--*"):
             if not model_dir.is_dir():
                 continue
@@ -318,12 +312,10 @@ class CacheManager:
                 if not (snap_dir.is_dir() or snap_dir.is_symlink()):
                     continue
 
-                # Symlink safety check: if snap_dir is a symlink, check target containment
                 if snap_dir.is_symlink():
                     try:
                         target_resolved = snap_dir.resolve()
                         if not target_resolved.is_relative_to(hub_resolved):
-                            # Points outside hub_dir: unlink symlink only, never rmtree target!
                             snap_dir.unlink()
                             removed_count += 1
                             continue
@@ -333,23 +325,18 @@ class CacheManager:
                         continue
 
                 snap_resolved = snap_dir.resolve()
-
-                # Containment check: must be inside self.hub_dir
                 try:
                     if not snap_resolved.is_relative_to(hub_resolved):
                         continue
                 except ValueError:
                     continue
 
-                # Must not be hub_dir itself or forgeai_home
                 if snap_resolved == hub_resolved or snap_resolved == self.forgeai_home.resolve():
                     continue
 
-                # Check if referenced directly
                 if snap_resolved in active_paths or str(snap_resolved) in active_snapshots:
                     continue
 
-                # Check if any active path is nested inside snap_resolved
                 is_active = False
                 for act_path in active_paths:
                     try:
@@ -358,11 +345,9 @@ class CacheManager:
                             break
                     except ValueError:
                         pass
-
                 if is_active:
                     continue
 
-                # Defensive deletion of unreferenced snapshot
                 try:
                     import shutil
 
@@ -374,6 +359,34 @@ class CacheManager:
         return removed_count
 
 
+class SecureCacheManager(CacheManager):
+    """Cache manager whose public download operation is always security validated."""
+
+    def download_snapshot(
+        self,
+        repo_id: str,
+        revision: str = "main",
+        token: str | None = None,
+    ) -> str:
+        raw_path = super().download_snapshot(repo_id, revision=revision, token=token)
+        return self._validate_snapshot_security(raw_path, repo_id, enable_safety_scan=True)
+
+    def download_snapshot_secure(
+        self,
+        repo_id: str,
+        revision: str = "main",
+        token: str | None = None,
+        *,
+        enable_safety_scan: bool = True,
+    ) -> str:
+        raw_path = super().download_snapshot(repo_id, revision=revision, token=token)
+        return self._validate_snapshot_security(
+            raw_path,
+            repo_id,
+            enable_safety_scan=enable_safety_scan,
+        )
+
+
 def download_model(
     repo_id: str,
     cache_dir: str | None = None,
@@ -381,26 +394,13 @@ def download_model(
     token: str | None = None,
     enable_safety_scan: bool = True,
 ) -> str:
-    """
-    Download a model from HuggingFace Hub using canonical CacheManager.
-
-    Args:
-        repo_id: HuggingFace repository ID.
-        cache_dir: Local cache directory.
-        revision: Specific model revision/branch.
-        token: HuggingFace API token for private models.
-        enable_safety_scan: Run safety scanner after download. Unsafe weight formats
-            remain blocked even when scanner execution is disabled.
-
-    Returns:
-        Local path to the downloaded model.
-    """
-    validate_repo_id_string(repo_id)
+    """Download a model from HuggingFace Hub and enforce the runtime safety policy."""
+    _validate_repo_id_or_raise(repo_id)
 
     if cache_dir:
         cache_path = Path(cache_dir).expanduser().resolve()
         manager = CacheManager(
-            forgeai_home=cache_path.parent / ".forgeai",
+            forgeai_home=cache_path / ".forgeai",
             hf_home=cache_path,
         )
     else:
@@ -409,11 +409,10 @@ def download_model(
     console.print(f"\n[bold]Downloading:[/bold] {repo_id}")
     if revision:
         console.print(f"  Revision: {revision}")
-
     if enable_safety_scan:
         console.print("\n[bold]Running safety scan...[/bold]")
 
-    local_path = manager.download_snapshot(
+    local_path = manager.download_snapshot_secure(
         repo_id,
         revision=revision or "main",
         token=token,
@@ -423,7 +422,6 @@ def download_model(
     console.print(f"\n[green]✓[/green] Model saved to: {local_path}")
     if enable_safety_scan:
         console.print("[green]✓[/green] Safety scan passed")
-
     return local_path
 
 
@@ -456,7 +454,7 @@ def get_cached_models(cache_dir: str | None = None) -> list[dict[str, str]]:
 
 def delete_cached_model(repo_id: str, cache_dir: str | None = None) -> bool:
     """Delete a cached model directory."""
-    validate_repo_id_string(repo_id)
+    _validate_repo_id_or_raise(repo_id)
 
     import shutil
 
