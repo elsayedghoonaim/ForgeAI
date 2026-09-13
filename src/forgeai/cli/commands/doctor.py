@@ -1,6 +1,4 @@
-"""
-forgeai doctor — Automated diagnostics and deployment audit reports.
-"""
+"""forgeai doctor — Automated diagnostics and deployment audit reports."""
 
 from __future__ import annotations
 
@@ -29,34 +27,33 @@ def check_python_version(sys_version_info: tuple[int, ...] = sys.version_info) -
 
 
 def check_vllm_diagnostic(vllm_module: Any = None) -> tuple[bool, str]:
-    """
-    Check exact vLLM version requirement (0.22.1).
-    Dependency-injectable via vllm_module.
-    """
+    """Check the exact vLLM version required by the ForgeAI runtime contract."""
+    from forgeai.core.security import REQUIRED_VLLM_VERSION, _parse_version
+
+    remediation = f"pip install 'vllm=={REQUIRED_VLLM_VERSION}'"
+
     if vllm_module is None:
         try:
             import vllm
 
             vllm_module = vllm
         except ImportError:
-            return False, "Not installed → pip install 'vllm==0.22.1'"
+            return False, f"Not installed → {remediation}"
 
     if vllm_module is False:
-        return False, "Not installed → pip install 'vllm==0.22.1'"
+        return False, f"Not installed → {remediation}"
 
     ver = getattr(vllm_module, "__version__", None)
     if ver is None:
-        return False, "Installed: unknown → pip install 'vllm==0.22.1'"
+        return False, f"Installed: unknown → {remediation}"
 
     try:
-        from forgeai.core.security import REQUIRED_VLLM_VERSION, _parse_version
-
         installed_ver = _parse_version(str(ver))
         req_ver = _parse_version(REQUIRED_VLLM_VERSION)
         if installed_ver.public != req_ver.public:
-            return False, escape(f"Installed: {ver} → pip install 'vllm=={REQUIRED_VLLM_VERSION}'")
+            return False, escape(f"Installed: {ver} → {remediation}")
     except Exception:
-        return False, escape(f"Installed: {ver} → pip install 'vllm==0.22.1'")
+        return False, escape(f"Installed: {ver} → {remediation}")
 
     return True, escape(f"Installed: {ver}")
 
@@ -85,8 +82,7 @@ def check_platform_diagnostic(
         if is_wsl:
             return True, "Linux (WSL2 supported)"
         return True, "Linux (native supported)"
-    else:
-        return False, f"{sys_name} unsupported — Linux or WSL2 required for vLLM engine execution"
+    return False, f"{sys_name} unsupported — Linux or WSL2 required for vLLM engine execution"
 
 
 def check_gpu_and_turboquant_diagnostic(
@@ -94,11 +90,7 @@ def check_gpu_and_turboquant_diagnostic(
     is_rocm: bool | None = None,
     environ: dict[str, str] | None = None,
 ) -> list[tuple[str, bool, str]]:
-    """
-    Check GPU availability and TurboQuant readiness.
-    Dependency-injectable with gpu_topology, is_rocm, environ.
-    Returns list of (check_name, status_bool, detail_str).
-    """
+    """Check GPU availability and TurboQuant readiness."""
     env = environ if environ is not None else os.environ
 
     if is_rocm is None:
@@ -132,7 +124,6 @@ def check_gpu_and_turboquant_diagnostic(
         ))
         return results
 
-    # CUDA / standard path
     gpu_ok = gpu_count > 0
     if not gpu_ok:
         results.append(("GPU available", False, "0 GPUs detected → Check NVIDIA drivers"))
@@ -142,7 +133,6 @@ def check_gpu_and_turboquant_diagnostic(
     first_gpu_name = getattr(gpus[0], "name", "GPU") if gpus else "GPU"
     results.append(("GPU available", True, f"{gpu_count} GPU(s) — {first_gpu_name}"))
 
-    # Compute capability check for TurboQuant readiness
     has_real_evidence = False
     cc_ok = False
     cc_detail = "Missing CC evidence → unknown/fail"
@@ -156,7 +146,6 @@ def check_gpu_and_turboquant_diagnostic(
                 cc_ok = True
                 cc_detail = f"NVIDIA CC {major}.{minor} >= 7.5"
             else:
-                cc_ok = False
                 cc_detail = f"NVIDIA CC {major}.{minor} < 7.5 (requires >= 7.5)"
 
     if not has_real_evidence:
@@ -174,28 +163,24 @@ def doctor(
     """System diagnostics with actionable remediation and deployment audit report."""
     console.print("\n[bold cyan]ForgeAI Doctor[/bold cyan]\n")
     from forgeai.core.telemetry import track_event
+    from forgeai.core.security import REQUIRED_VLLM_VERSION
 
     track_event("command.doctor")
 
     checks: list[tuple[str, bool, str]] = []
 
-    # 1. Python version check (>= 3.12, < 3.13)
     py_ok, py_detail = check_python_version()
     checks.append(("Python >= 3.12, < 3.13", py_ok, py_detail))
 
-    # 2. vLLM check (exact 0.22.1)
     vllm_ok, vllm_detail = check_vllm_diagnostic()
-    checks.append(("vLLM == 0.22.1", vllm_ok, vllm_detail))
+    checks.append((f"vLLM == {REQUIRED_VLLM_VERSION}", vllm_ok, vllm_detail))
 
-    # 3. Platform OS check (Linux / WSL2)
     plat_ok, plat_detail = check_platform_diagnostic()
     checks.append(("Platform (Linux / WSL2)", plat_ok, plat_detail))
 
-    # 4. GPU & TurboQuant readiness check
     gpu_checks = check_gpu_and_turboquant_diagnostic()
     checks.extend(gpu_checks)
 
-    # 5. CUDA environment configuration
     cuda_home = os.environ.get("CUDA_HOME") or os.environ.get("CUDA_PATH")
     checks.append((
         "CUDA configured",
@@ -203,7 +188,6 @@ def doctor(
         f"CUDA_HOME={cuda_home}" if cuda_home else "Not set → Set CUDA_HOME",
     ))
 
-    # 6. Core Dependencies
     dependency_checks = [
         ("typer", "typer"),
         ("fastapi", "fastapi"),
@@ -220,7 +204,6 @@ def doctor(
         except ImportError:
             checks.append((package_name, False, escape(f"Missing → pip install {package_name}")))
 
-    # 7. Security checks
     try:
         from forgeai.core.security import validate_environment
 
@@ -232,7 +215,6 @@ def doctor(
     except Exception:
         checks.append(("Security checks", False, "Could not run security validation"))
 
-    # Display results table
     table = Table(title="Diagnostic Results", show_lines=True)
     table.add_column("Check", style="white")
     table.add_column("Status", justify="center")
@@ -247,7 +229,6 @@ def doctor(
 
     console.print(table)
 
-    # Score
     score = (passed_count / total * 100) if total > 0 else 0
     color = "green" if score >= 80 else "yellow" if score >= 50 else "red"
     console.print(
