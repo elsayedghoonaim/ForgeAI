@@ -1,5 +1,7 @@
 # Architectural Execution Plan: Clean-Room Ollama-Compatible LLM Runtime via vLLM and TurboQuant
 
+> Historical implementation plan: the current runtime/security baseline is `vllm==0.30.0`. Version-specific installation and deployment examples below are superseded by the current README, WSL guide, and package/Docker pins. Retained 0.22.1 sources and performance figures describe the original evidence; they do not validate 0.30.0 on hardware.
+
 ## Primary Source Citations & References
 *   **Ollama Official Documentation & Specifications**:
     *   [Ollama API Reference](https://docs.ollama.com/api/introduction)

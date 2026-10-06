@@ -6,7 +6,7 @@
 - **Thin Client Architecture**: Commands like `pull`, `run`, `ls`, `ps`, `show`, `stop`, and `rm` act as thin clients communicating with the running daemon. `forgeai create` validates and registers manifests locally in the shared registry without requiring a running daemon or loading an engine.
 - **Warm-Engine Reuse**: Manages warm vLLM engine instances in memory with bounded model capacity and `keep_alive` idle eviction. No per-request serving process creation.
 - **Dual API Surface**: Exposes all 9 implemented Ollama-compatible `/api/*` endpoints (streaming via NDJSON) and OpenAI-compatible `/v1/*` endpoints (streaming via SSE).
-- **Pinned vLLM Runtime**: Pinned to exact `vllm==0.22.1` for maximum stability and native TurboQuant KV-cache support.
+- **Pinned vLLM Runtime**: Pinned to exact `vllm==0.30.0` for maximum stability and native TurboQuant KV-cache support.
 
 ---
 
@@ -40,8 +40,8 @@ forgeai run Qwen/Qwen2.5-7B-Instruct "Explain quantum computing in 3 sentences."
 
 | Component | Policy & Stance |
 |-----------|-----------------|
-| **Engine** | Strictly **vLLM-only** (`vllm==0.22.1`). Alternative backends (llama.cpp) are removed. |
-| **Hardware** | Requires a supported GPU vLLM runtime (`vllm==0.22.1`). The primary bundled image and WSL path target **NVIDIA CUDA**. |
+| **Engine** | Strictly **vLLM-only** (`vllm==0.30.0`). Alternative backends (llama.cpp) are removed. |
+| **Hardware** | Requires a supported GPU vLLM runtime (`vllm==0.30.0`). The primary bundled image and WSL path target **NVIDIA CUDA**. |
 | **ROCm Support** | Requires separate official vLLM ROCm wheels/images. TurboQuant is **unavailable/deferred on ROCm** (ROCm users must explicitly select supported non-TurboQuant KV dtypes: `auto` or `fp8`). `auto` preserves the model dtype (commonly BF16). |
 | **CPU Support** | CPU inference is **unsupported** (no CPU fallback exists). |
 | **Model Formats** | **Hugging Face repositories** and local **safetensors** directories are supported. **GGUF models are explicitly rejected** at admission time. |
@@ -139,10 +139,10 @@ ForgeAI explicitly distinguishes between model-weight quantization and KV-cache 
 2. **KV-Cache Quantization** (`kv_cache.dtype`): Controls precision of the key-value attention cache in vLLM memory:
    - `auto`: Preserves the model's native execution precision (commonly BF16)
    - `fp8`: 8-bit floating point KV cache
-   - `turboquant_4bit_nc` & `turboquant_k8v4`: Native TurboQuant presets exposed by pinned `vllm==0.22.1`.
+   - `turboquant_4bit_nc` & `turboquant_k8v4`: Native TurboQuant presets exposed by pinned `vllm==0.30.0`.
 
 > [!IMPORTANT]
-> `turboquant_4bit_nc` and `turboquant_k8v4` are native in pinned `vllm==0.22.1` ([vLLM TurboQuant Docs](https://docs.vllm.ai/en/v0.22.1/api/vllm/model_executor/layers/quantization/turboquant/)), but remain **experimental and POC-gated** in ForgeAI until Task 7 hardware validation. No GPU runtime validation was performed on this machine.
+> `turboquant_4bit_nc` and `turboquant_k8v4` are native in pinned `vllm==0.30.0` ([vLLM TurboQuant Docs](https://docs.vllm.ai/en/v0.30.0/api/vllm/model_executor/layers/quantization/turboquant/)), but remain **experimental and POC-gated** in ForgeAI until Task 7 hardware validation. No GPU runtime validation was performed on this machine.
 
 ---
 
@@ -265,7 +265,7 @@ Streaming on OpenAI endpoints uses **Server-Sent Events (SSE)** (`"stream": true
 ## Docker & Container Deployment
 
 ### Base Image Strategy
-ForgeAI 2.0.0 uses an NVIDIA vLLM base image (`vllm/vllm-openai:v0.22.1`).
+ForgeAI 2.0.0 uses an NVIDIA vLLM base image (`vllm/vllm-openai:v0.30.0`).
 
 > [!NOTE]
 > Production operators should resolve and pin the official base image by immutable `RepoDigest` (e.g., `vllm/vllm-openai@sha256:...`) after pulling.
@@ -294,9 +294,9 @@ kubectl apply -f k8s/deployment.yaml
 ## Official Reference Links
 
 - [Official Ollama Documentation](https://docs.ollama.com/)
-- [Official vLLM Documentation (v0.22.1)](https://docs.vllm.ai/en/v0.22.1/)
-- [vLLM TurboQuant Quantization API](https://docs.vllm.ai/en/v0.22.1/api/vllm/model_executor/layers/quantization/turboquant/)
-- [vLLM GPU Installation Guide](https://docs.vllm.ai/en/v0.22.1/getting_started/installation/gpu/)
+- [Official vLLM Documentation (v0.30.0)](https://docs.vllm.ai/en/v0.30.0/)
+- [vLLM TurboQuant Quantization API](https://docs.vllm.ai/en/v0.30.0/api/vllm/model_executor/layers/quantization/turboquant/)
+- [vLLM GPU Installation Guide](https://docs.vllm.ai/en/v0.30.0/getting_started/installation/gpu/)
 - [ForgeAI Self-Contained Execution Plan](docs/plans/ollama-vllm-turboquant.md) — Full compatibility and resource allocation matrix.
 
 ---

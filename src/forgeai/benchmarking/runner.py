@@ -2,7 +2,7 @@
 Explicit sequential TurboQuant hardware POC runner for ForgeAI.
 
 Provides implementation-ready, explicit opt-in hardware execution path:
-- Preflight safety checks (Linux/WSL2, vLLM==0.22.1, CUDA >= 7.5, VRAM > 0, executables);
+- Preflight safety checks (Linux/WSL2, vLLM==0.30.0, CUDA >= 7.5, VRAM > 0, executables);
 - Dedicated GPU used-memory sampling via nvidia-smi --query-gpu=memory.used returning float | None;
 - Sequential process lifecycle management (at most one vllm serve child, bounded readiness polling);
 - Guaranteed teardown safety in finally blocks (graceful terminate, bounded wait, kill exact child);
@@ -151,7 +151,7 @@ def run_preflight(
 
     Verifies:
     1. Environment is Linux or WSL2 (native Windows and CPU execution are rejected);
-    2. Installed vLLM version is exactly "0.22.1";
+    2. Installed vLLM version is exactly "0.30.0";
     3. Executables 'vllm' and 'nvidia-smi' exist in PATH;
     4. NVIDIA CUDA GPU metadata exists, VRAM > 0, compute capability is parseable and >= 7.5.
     """
@@ -175,7 +175,7 @@ def run_preflight(
             f"Unsupported execution environment '{plat}'. Hardware benchmark requires Linux or WSL2."
         )
 
-    # 2. vLLM version check (strictly 0.22.1)
+    # 2. vLLM version check (strictly 0.30.0)
     installed_ver = ""
     try:
         installed_ver = get_vllm_ver()

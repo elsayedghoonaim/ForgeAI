@@ -7,7 +7,7 @@ This project is designed for high-performance inference on Linux and WSL2 using 
 Use this guide when you want to:
 
 - create a working Python 3.12 `.venv` from WSL
-- install ForgeAI 2.0.0 with pinned `vllm==0.22.1` GPU extras
+- install ForgeAI 2.0.0 with pinned `vllm==0.30.0` GPU extras
 - avoid editable-install failures on DrvFs mounts
 - verify CUDA and the local CLI
 - run the single-daemon server on port 11434 and smoke-test it
@@ -38,7 +38,7 @@ source .venv/bin/activate
 What the script does:
 - requires Python 3.12
 - creates a virtual environment on the Linux filesystem if under `/mnt/...`
-- installs the project in editable mode with base dependencies and optional GPU extras (`vllm==0.22.1`)
+- installs the project in editable mode with base dependencies and optional GPU extras (`vllm==0.30.0`)
 
 ## Development / Non-GPU Install
 
@@ -48,7 +48,7 @@ If you only want a lightweight management environment for unit tests and code in
 INSTALL_GPU=0 ./scripts/bootstrap_wsl.sh
 ```
 
-> **Warning:** Without `vllm==0.22.1`, model inference is **UNAVAILABLE**. CPU fallback is not supported.
+> **Warning:** Without `vllm==0.30.0`, model inference is **UNAVAILABLE**. CPU fallback is not supported.
 
 ## Manual Install
 
