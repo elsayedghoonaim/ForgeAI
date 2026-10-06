@@ -36,7 +36,7 @@ jobs:
         run: python -m pip check
 
       - name: Run pip-audit
-        # vLLM 0.29.0 currently requires setuptools<81, while
+        # vLLM 0.30.0 currently requires setuptools<81, while
         # PYSEC-2026-3447 is fixed in setuptools 83.0.0. The advisory affects
         # MANIFEST.in matching when building source distributions on macOS,
         # not ForgeAI runtime execution. ForgeAI's isolated build backend is

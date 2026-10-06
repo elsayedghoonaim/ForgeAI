@@ -187,7 +187,7 @@ def test_pyproject_toml_and_dockerfile_dependencies() -> None:
 
 
 def test_pyproject_toml_python_version_and_vllm_pinning() -> None:
-    """Verify Python 3.12 and the exact vLLM 0.29.0 runtime contract in every supported extra."""
+    """Verify Python 3.12 and the exact vLLM 0.30.0 runtime contract in every supported extra."""
     pyproject_path = REPO_ROOT / "pyproject.toml"
     pyproject_data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
 
@@ -197,7 +197,7 @@ def test_pyproject_toml_python_version_and_vllm_pinning() -> None:
 
     opt_deps = project.get("optional-dependencies", {})
     required_vllm_extras = ["gpu", "vllm", "all"]
-    expected_vllm = "vllm==0.29.0"
+    expected_vllm = "vllm==0.30.0"
 
     for extra in required_vllm_extras:
         assert extra in opt_deps, f"Expected optional dependency extra '{extra}' in pyproject.toml"

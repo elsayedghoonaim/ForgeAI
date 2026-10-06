@@ -1,11 +1,11 @@
 # ============================================================
 # ForgeAI - Production Docker Image (NVIDIA vLLM-only)
-# Base: Official vLLM OpenAI image (v0.29.0)
+# Base: Official vLLM OpenAI image (v0.30.0)
 # Note: For production deployments, operators should resolve and pin
 # VLLM_IMAGE to an immutable RepoDigest (e.g. vllm/vllm-openai@sha256:...)
 # ============================================================
 
-ARG VLLM_IMAGE=vllm/vllm-openai:v0.29.0
+ARG VLLM_IMAGE=vllm/vllm-openai:v0.30.0
 FROM ${VLLM_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -21,7 +21,7 @@ WORKDIR /workspace
 COPY pyproject.toml README.md ./
 COPY src/ src/
 
-# Install ForgeAI base package and runtime dependencies. vLLM 0.29.0 is
+# Install ForgeAI base package and runtime dependencies. vLLM 0.30.0 is
 # supplied by the upstream image and enforced again by ForgeAI at startup.
 RUN pip install --no-build-isolation .
 

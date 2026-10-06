@@ -19,10 +19,10 @@ console = Console()
 
 # Current security baseline. Older releases have known vulnerabilities that are
 # relevant to long-running, multi-user inference services.
-MIN_VLLM_VERSION = "0.29.0"
+MIN_VLLM_VERSION = "0.30.0"
 
 # Exact pinned vLLM version for runtime engine enforcement.
-REQUIRED_VLLM_VERSION = "0.29.0"
+REQUIRED_VLLM_VERSION = "0.30.0"
 
 
 def _parse_version(version_str: str) -> Version:

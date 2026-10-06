@@ -4,7 +4,7 @@ TurboQuant proof-of-concept benchmark artifact model and pure decision evaluator
 Defines benchmark profiles, result/artifact schema, required measurements, exact decision
 gates, and pure go/no-go evaluation rules relative to BF16 baseline.
 
-Pinned to exact vLLM contract: vllm==0.22.1.
+Pinned to exact vLLM contract: vllm==0.30.0.
 Never claims hardware validation ran without verified empirical measurements.
 """
 
@@ -17,8 +17,8 @@ import math
 from typing import Any
 
 # Contract Pinning
-VLLM_PINNED_VERSION: str = "0.22.1"
-VLLM_CONTRACT_SPEC: str = "vllm==0.22.1"
+VLLM_PINNED_VERSION: str = "0.30.0"
+VLLM_CONTRACT_SPEC: str = "vllm==0.30.0"
 SCHEMA_VERSION: str = "2.0"
 
 # Status Constants
@@ -512,7 +512,7 @@ def evaluate_artifact(
 
     GATES CONTRACT IDENTITY FIRST:
     - schema_version == SCHEMA_VERSION ("2.0")
-    - vllm_version == VLLM_CONTRACT_SPEC ("vllm==0.22.1")
+    - vllm_version == VLLM_CONTRACT_SPEC ("vllm==0.30.0")
     - hardware_validation_performed is True
     - hardware platform is CUDA
     - total_vram_mb > 0

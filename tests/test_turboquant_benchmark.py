@@ -1,7 +1,7 @@
 """
 Pure deterministic unit tests for TurboQuant POC artifact model, evaluator, and hardware runner.
 
-Verifies profile specifications, contract identity gating (vllm==0.22.1, CUDA >= 7.5, VRAM > 0),
+Verifies profile specifications, contract identity gating (vllm==0.30.0, CUDA >= 7.5, VRAM > 0),
 preflight safety checks (Linux/WSL2, version match, executables, GPU), command construction,
 dedicated used-memory GPU parsing, sampler failure vs genuine 0.0 MiB reading, valid streaming token timing,
 completion_tokens > 1 decode rate requirement, active soak load with immediate stop on request failure,
@@ -57,11 +57,11 @@ class TurboQuantContractAndCatalogTests(unittest.TestCase):
     """Test contract pinning, profile catalog rules, compute capability parser, and schema separation."""
 
     def test_vllm_pinning_contract(self) -> None:
-        self.assertEqual(VLLM_PINNED_VERSION, "0.22.1")
-        self.assertEqual(VLLM_CONTRACT_SPEC, "vllm==0.22.1")
+        self.assertEqual(VLLM_PINNED_VERSION, "0.30.0")
+        self.assertEqual(VLLM_CONTRACT_SPEC, "vllm==0.30.0")
 
         plan = create_benchmark_plan()
-        self.assertEqual(plan.vllm_version, "vllm==0.22.1")
+        self.assertEqual(plan.vllm_version, "vllm==0.30.0")
         self.assertEqual(plan.schema_version, SCHEMA_VERSION)
 
     def test_cuda_compute_capability_parser(self) -> None:

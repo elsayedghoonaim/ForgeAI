@@ -146,8 +146,8 @@ class BenchmarkCLITests(unittest.TestCase):
 
 
 class ExactVllmVersionCheckerTests(unittest.TestCase):
-    def test_accepts_exact_0_29_0_and_local_build_metadata(self) -> None:
-        for ver in ["0.29.0", "0.29.0+cu129", "0.29.0+rocm6.0"]:
+    def test_accepts_exact_0_30_0_and_local_build_metadata(self) -> None:
+        for ver in ["0.30.0", "0.30.0+cu129", "0.30.0+rocm6.0"]:
             mock_vllm = ModuleType("vllm")
             mock_vllm.__version__ = ver
             with self.subTest(version=ver):
@@ -167,34 +167,34 @@ class ExactVllmVersionCheckerTests(unittest.TestCase):
         self.assertIn("Cannot determine vLLM version", str(ctx.exception))
 
     def test_rejects_older_versions(self) -> None:
-        for ver in ["0.14.0", "0.28.0"]:
+        for ver in ["0.14.0", "0.28.0", "0.29.0", "0.29.1"]:
             mock_vllm = ModuleType("vllm")
             mock_vllm.__version__ = ver
             with self.subTest(version=ver):
                 with self.assertRaises(RuntimeError) as ctx:
                     check_required_vllm_version(vllm_module=mock_vllm, announce_success=False)
-                self.assertIn("ForgeAI requires exact vLLM version 0.29.0", str(ctx.exception))
+                self.assertIn("ForgeAI requires exact vLLM version 0.30.0", str(ctx.exception))
 
     def test_rejects_newer_versions(self) -> None:
-        for ver in ["0.29.1", "0.30.0"]:
+        for ver in ["0.30.1", "0.31.0"]:
             mock_vllm = ModuleType("vllm")
             mock_vllm.__version__ = ver
             with self.subTest(version=ver):
                 with self.assertRaises(RuntimeError) as ctx:
                     check_required_vllm_version(vllm_module=mock_vllm, announce_success=False)
-                self.assertIn("ForgeAI requires exact vLLM version 0.29.0", str(ctx.exception))
+                self.assertIn("ForgeAI requires exact vLLM version 0.30.0", str(ctx.exception))
 
     def test_rejects_prerelease_and_dev_versions(self) -> None:
-        for ver in ["0.29.0rc1", "0.29.0.dev0"]:
+        for ver in ["0.30.0rc1", "0.30.0.dev0"]:
             mock_vllm = ModuleType("vllm")
             mock_vllm.__version__ = ver
             with self.subTest(version=ver):
                 with self.assertRaises(RuntimeError) as ctx:
                     check_required_vllm_version(vllm_module=mock_vllm, announce_success=False)
-                self.assertIn("ForgeAI requires exact vLLM version 0.29.0", str(ctx.exception))
+                self.assertIn("ForgeAI requires exact vLLM version 0.30.0", str(ctx.exception))
 
     def test_rejects_malformed_versions(self) -> None:
-        for ver in ["not-a-valid-version", "0.29.0.invalid!"]:
+        for ver in ["not-a-valid-version", "0.30.0.invalid!"]:
             mock_vllm = ModuleType("vllm")
             mock_vllm.__version__ = ver
             with self.subTest(version=ver):
@@ -238,7 +238,7 @@ class DoctorDiagnosticContractTests(unittest.TestCase):
         self.assertFalse(ok)
 
     def test_doctor_vllm_exact_check(self) -> None:
-        for ver in ["0.29.0", "0.29.0+cu129", "0.29.0+rocm6.0"]:
+        for ver in ["0.30.0", "0.30.0+cu129", "0.30.0+rocm6.0"]:
             mock_vllm = ModuleType("vllm")
             mock_vllm.__version__ = ver
             with self.subTest(version=ver):
@@ -255,12 +255,12 @@ class DoctorDiagnosticContractTests(unittest.TestCase):
         mock_vllm.__version__ = "not-a-valid-version"
         ok, detail = check_vllm_diagnostic(mock_vllm)
         self.assertFalse(ok)
-        self.assertIn("Installed: not-a-valid-version → pip install 'vllm==0.29.0'", detail)
+        self.assertIn("Installed: not-a-valid-version → pip install 'vllm==0.30.0'", detail)
 
         mock_vllm.__version__ = None
         ok, detail = check_vllm_diagnostic(mock_vllm)
         self.assertFalse(ok)
-        self.assertIn("Installed: unknown → pip install 'vllm==0.29.0'", detail)
+        self.assertIn("Installed: unknown → pip install 'vllm==0.30.0'", detail)
 
         ok, detail = check_vllm_diagnostic(vllm_module=False)
         self.assertFalse(ok)
