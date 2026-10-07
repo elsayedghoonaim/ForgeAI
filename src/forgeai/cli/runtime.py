@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 from collections.abc import Generator
@@ -21,6 +22,30 @@ from forgeai.utils.gpu import (
 )
 
 console = Console()
+logger = logging.getLogger(__name__)
+
+# Timeouts (seconds). Override with env vars; a value of 0/none/inf disables that timeout.
+CONNECT_TIMEOUT_ENV = "FORGEAI_CONNECT_TIMEOUT"
+REQUEST_TIMEOUT_ENV = "FORGEAI_REQUEST_TIMEOUT"
+LONG_TIMEOUT_ENV = "FORGEAI_LONG_TIMEOUT"
+DEFAULT_CONNECT_TIMEOUT = 5.0
+DEFAULT_REQUEST_TIMEOUT = 30.0
+
+
+def _timeout_from_env(name: str, default: float | None) -> float | None:
+    """Read a timeout from the environment; 0/none/inf/off mean no timeout."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in {"0", "none", "inf", "off", "never"}:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        logger.warning("Ignoring invalid %s=%r (expected seconds)", name, raw)
+        return default
+    return seconds if seconds > 0 else None
 
 
 class DaemonClientError(Exception):
@@ -57,6 +82,8 @@ def resolve_base_url(
     if base_url:
         url = base_url.strip().rstrip("/")
         if not (url.startswith("http://") or url.startswith("https://")):
+            if url.count(":") > 1 and not url.startswith("["):
+                url = f"[{url}]"  # bare IPv6 literal
             url = f"http://{url}"
         return url
 
@@ -82,7 +109,9 @@ def resolve_base_url(
             scheme = "https"
             h = h[8:]
 
-        if ":" in h and not h.endswith("]"):
+        if h.count(":") > 1 and not h.startswith("["):
+            h = f"[{h}]"  # bare IPv6 literal such as ::1 (no embedded port is possible)
+        elif ":" in h and not h.endswith("]"):
             hostname, host_port_str = h.rsplit(":", 1)
             if host_port_str.isdigit():
                 embedded_port = _parse_and_validate_port(host_port_str, "host parameter")
@@ -109,6 +138,11 @@ def resolve_base_url(
 class DaemonClient:
     """
     Client for interacting with the local Ollama-compatible daemon.
+
+    Timeouts: connect is short (5 s). Quick management calls use a 30 s read timeout; long
+    operations (streaming generate/chat/pull, non-streaming generate/pull with ``long=True``)
+    have no read timeout, since cold loads and downloads can take minutes. All are
+    overridable via FORGEAI_CONNECT_TIMEOUT / FORGEAI_REQUEST_TIMEOUT / FORGEAI_LONG_TIMEOUT.
     """
 
     def __init__(
@@ -116,21 +150,46 @@ class DaemonClient:
         base_url: str | None = None,
         host: str | None = None,
         port: int | None = None,
-        timeout: float = 30.0,
+        timeout: float | None = None,
     ) -> None:
         self.base_url = resolve_base_url(host=host, port=port, base_url=base_url)
-        self._timeout_seconds = timeout
+        self._timeout_seconds: float | None = (
+            timeout
+            if timeout is not None
+            else _timeout_from_env(REQUEST_TIMEOUT_ENV, DEFAULT_REQUEST_TIMEOUT)
+        )
+
+    def build_timeout(self, long: bool = False) -> Any:
+        """httpx.Timeout (httpx is imported lazily to keep CLI startup fast)."""
+        import httpx
+
+        connect = _timeout_from_env(CONNECT_TIMEOUT_ENV, DEFAULT_CONNECT_TIMEOUT)
+        read = _timeout_from_env(LONG_TIMEOUT_ENV, None) if long else self._timeout_seconds
+        return httpx.Timeout(connect=connect, read=read, write=self._timeout_seconds, pool=5.0)
 
     @property
     def timeout(self) -> Any:
-        """httpx.Timeout for this client (httpx is imported lazily to keep CLI startup fast)."""
+        return self.build_timeout(long=False)
+
+    def _timeout_error(self, err: Exception, long: bool) -> DaemonClientError:
         import httpx
 
-        return httpx.Timeout(
-            connect=5.0,
-            read=self._timeout_seconds,
-            write=self._timeout_seconds,
-            pool=5.0,
+        if isinstance(err, httpx.ConnectTimeout):
+            connect = _timeout_from_env(CONNECT_TIMEOUT_ENV, DEFAULT_CONNECT_TIMEOUT)
+            return DaemonClientError(
+                f"Could not connect to daemon at {self.base_url} within {connect:g} s. "
+                f"Is the server running? Start it with: forgeai serve"
+            )
+        limit = _timeout_from_env(LONG_TIMEOUT_ENV, None) if long else self._timeout_seconds
+        seconds = f"{limit:g} s" if limit is not None else "the configured timeout"
+        return DaemonClientError(
+            f"The daemon at {self.base_url} did not respond within {seconds}. "
+            f"It is reachable but slow or busy; raise {LONG_TIMEOUT_ENV if long else REQUEST_TIMEOUT_ENV} to wait longer."
+        )
+
+    def _connect_error(self) -> DaemonClientError:
+        return DaemonClientError(
+            f"Could not connect to daemon at {self.base_url}. Is the server running? Start it with: forgeai serve"
         )
 
     def request(
@@ -139,13 +198,18 @@ class DaemonClient:
         path: str,
         json_data: Any = None,
         params: Any = None,
+        *,
+        long: bool = False,
     ) -> dict[str, Any]:
-        """Make an ordinary JSON HTTP request and return parsed JSON."""
+        """Make an ordinary JSON HTTP request and return parsed JSON.
+
+        ``long=True`` removes the read timeout (non-streaming generate / pull).
+        """
         import httpx
 
         url = f"{self.base_url}{path if path.startswith('/') else '/' + path}"
         try:
-            with httpx.Client(timeout=self.timeout) as client:
+            with httpx.Client(timeout=self.build_timeout(long)) as client:
                 response = client.request(method, url, json=json_data, params=params)
                 if response.status_code >= 400:
                     try:
@@ -163,10 +227,10 @@ class DaemonClient:
                     raise DaemonClientError(f"Malformed JSON response from daemon: {err}") from err
         except DaemonClientError:
             raise
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError, httpx.RequestError) as err:
-            raise DaemonClientError(
-                f"Could not connect to daemon at {self.base_url}. Is the server running? Start it with: forgeai serve"
-            ) from err
+        except httpx.TimeoutException as err:
+            raise self._timeout_error(err, long) from err
+        except (httpx.ConnectError, httpx.NetworkError, httpx.RequestError) as err:
+            raise self._connect_error() from err
         except Exception as err:
             raise DaemonClientError(f"HTTP request failed: {err}") from err
 
@@ -177,13 +241,16 @@ class DaemonClient:
         json_data: Any = None,
         params: Any = None,
     ) -> Generator[dict[str, Any], None, None]:
-        """Stream NDJSON response line-by-line without buffering the whole response."""
+        """Stream NDJSON response line-by-line without buffering the whole response.
+
+        Uses the long (no read) timeout: the gap before the first token can be minutes.
+        """
         import httpx
 
         url = f"{self.base_url}{path if path.startswith('/') else '/' + path}"
         try:
             with (
-                httpx.Client(timeout=self.timeout) as client,
+                httpx.Client(timeout=self.build_timeout(long=True)) as client,
                 client.stream(method, url, json=json_data, params=params) as response,
             ):
                 if response.status_code >= 400:
@@ -210,10 +277,10 @@ class DaemonClient:
                     yield item
         except DaemonClientError:
             raise
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError, httpx.RequestError) as err:
-            raise DaemonClientError(
-                f"Could not connect to daemon at {self.base_url}. Is the server running? Start it with: forgeai serve"
-            ) from err
+        except httpx.TimeoutException as err:
+            raise self._timeout_error(err, True) from err
+        except (httpx.ConnectError, httpx.NetworkError, httpx.RequestError) as err:
+            raise self._connect_error() from err
         except Exception as err:
             raise DaemonClientError(f"HTTP stream failed: {err}") from err
 
@@ -371,8 +438,8 @@ def resolve_runtime_tuning(
                 auto_enforce_eager = enforce_eager
             else:
                 enforce_eager = _parse_bool_env(os.getenv(RUN_ENFORCE_EAGER_ENV))
-    except Exception:
-        pass
+    except Exception as err:
+        logger.warning("GPU auto-tuning failed, using defaults: %s", err)
 
     if effective_gpu_util is None:
         effective_gpu_util = DEFAULT_GPU_MEMORY_UTILIZATION

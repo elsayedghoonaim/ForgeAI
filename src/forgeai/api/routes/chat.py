@@ -11,7 +11,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from forgeai.api.streaming import guarded_stream_response, sse_error_frames
 from forgeai.core.backends.base import StreamStats, abort_request, iter_stream
@@ -22,6 +22,24 @@ router = APIRouter()
 class ChatMessage(BaseModel):
     role: str = "user"
     content: str = ""
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def _normalize_content(cls, value: Any) -> Any:
+        """Accept OpenAI content parts and null: text parts are concatenated, others ignored."""
+        if value is None:
+            return ""
+        if isinstance(value, list):
+            texts: list[str] = []
+            for part in value:
+                if isinstance(part, str):
+                    texts.append(part)
+                elif isinstance(part, dict) and part.get("type", "text") == "text":
+                    text = part.get("text")
+                    if isinstance(text, str):
+                        texts.append(text)
+            return "".join(texts)
+        return value
 
 
 class ChatCompletionRequest(BaseModel):
@@ -86,9 +104,14 @@ def _chat_events(
             top_p=body.top_p,
             stop=body.stop,
         )
+        first = True
         async with contextlib.aclosing(source) as chunks:  # type: ignore[type-var]
             async for chunk in chunks:
-                yield _frame({"content": chunk})
+                # OpenAI clients expect the role on the very first chunk
+                yield _frame({"role": "assistant", "content": chunk} if first else {"content": chunk})
+                first = False
+        if first:  # empty completion: still announce the role
+            yield _frame({"role": "assistant", "content": ""})
         request.state.prompt_tokens = stats.prompt_tokens
         request.state.completion_tokens = stats.completion_tokens
         yield _frame({}, stats.finish_reason or "stop")
@@ -117,6 +140,8 @@ async def create_chat_completion(
             raise HTTPException(
                 status_code=404, detail=f"Model '{body.model}' not found"
             ) from err
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err)) from err
 
         acquired = True
         try:

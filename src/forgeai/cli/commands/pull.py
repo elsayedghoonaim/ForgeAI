@@ -54,7 +54,7 @@ def pull(
 
             console.print("\n[green]OK[/green] Model ready.")
         else:
-            res = client.request("POST", "/api/pull", json_data=payload)
+            res = client.request("POST", "/api/pull", json_data=payload, long=True)
             status = res.get("status")
             digest = res.get("digest")
 

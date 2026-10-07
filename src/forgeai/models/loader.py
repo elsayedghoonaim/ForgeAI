@@ -13,6 +13,7 @@ import stat
 import sys
 from contextlib import contextmanager, suppress
 from pathlib import Path
+from typing import Any
 
 from rich.console import Console
 
@@ -33,8 +34,13 @@ DOWNLOAD_ALLOW_PATTERNS: list[str] = [
     "*.txt",
     "chat_template*",
     "*.jinja",
-    "*.py",  # custom modelling code, only executed when trust_remote_code is enabled
 ]
+# Custom modelling code is only fetched when trust_remote_code is explicitly requested.
+REMOTE_CODE_ALLOW_PATTERNS: list[str] = ["*.py"]
+
+
+class SecurityBlockError(ValueError):
+    """Raised when a downloaded snapshot fails the safety scan (and has been purged)."""
 
 
 def _is_valid_repo_id(repo_id: str) -> bool:
@@ -149,10 +155,12 @@ class CacheManager:
         repo_id: str,
         revision: str = "main",
         token: str | None = None,
+        trust_remote_code: bool = False,
     ) -> str:
         """
         Download snapshot using Hugging Face snapshot_download.
         Reuses existing snapshot if repo_id/revision is already present in canonical HF cache.
+        ``*.py`` files are only fetched when ``trust_remote_code`` is True.
         """
         validate_repo_id_string(repo_id)
 
@@ -182,7 +190,8 @@ class CacheManager:
                 cache_dir=str(self.hf_home),
                 revision=revision,
                 token=token,
-                allow_patterns=DOWNLOAD_ALLOW_PATTERNS,
+                allow_patterns=DOWNLOAD_ALLOW_PATTERNS
+                + (REMOTE_CODE_ALLOW_PATTERNS if trust_remote_code else []),
             )
 
             return str(local_path)
@@ -192,9 +201,55 @@ class CacheManager:
         repo_id: str,
         revision: str = "main",
         token: str | None = None,
+        trust_remote_code: bool = False,
     ) -> str:
         """Async wrapper for download_snapshot."""
-        return await asyncio.to_thread(self.download_snapshot, repo_id, revision, token)
+        return await asyncio.to_thread(
+            self.download_snapshot, repo_id, revision, token, trust_remote_code
+        )
+
+    def purge_snapshot(self, snapshot_path: str | Path) -> None:
+        """Delete a snapshot, the blobs only it referenced, and any refs pointing at it."""
+        import shutil
+
+        snap = Path(snapshot_path)
+        hub = self.hub_dir.resolve()
+        # snapshots/<commit>: resolve the parent only, the snapshot dir itself may be a symlink
+        snap_abs = snap.parent.resolve() / snap.name
+        model_dir = snap_abs.parent.parent
+        if snap_abs.parent.name != "snapshots" or not model_dir.is_relative_to(hub):
+            # Not a hub-layout snapshot (e.g. a plain directory): remove just that directory.
+            if snap_abs.is_dir() and not snap_abs.is_symlink():
+                shutil.rmtree(snap_abs, ignore_errors=True)
+            return
+        commit = snap_abs.name
+
+        if snap_abs.is_symlink():
+            snap_abs.unlink()
+        elif snap_abs.is_dir():
+            shutil.rmtree(snap_abs, ignore_errors=True)
+
+        refs_dir = model_dir / "refs"
+        if refs_dir.is_dir():
+            for ref in refs_dir.rglob("*"):
+                with suppress(OSError):
+                    if ref.is_file() and ref.read_text(encoding="utf-8").strip() == commit:
+                        ref.unlink()
+
+        self._prune_unreferenced_blobs(model_dir)
+
+    def scan_snapshot_or_purge(self, snapshot_path: str | Path, repo_id: str) -> dict[str, Any]:
+        """Run the safety scan; on failure purge the snapshot and raise SecurityBlockError."""
+        from forgeai.models.safety_scanner import scan_model_weights
+
+        scan_result = scan_model_weights(str(snapshot_path))
+        if not scan_result["safe"]:
+            self.purge_snapshot(snapshot_path)
+            raise SecurityBlockError(
+                f"SECURITY BLOCK: Model safety scan failed for {repo_id}. "
+                f"Reason: {scan_result.get('reason', 'Unknown')}"
+            )
+        return scan_result
 
     def garbage_collect_unreferenced(self, active_snapshots: list[str]) -> int:
         """
@@ -328,6 +383,7 @@ def download_model(
     revision: str | None = None,
     token: str | None = None,
     enable_safety_scan: bool = True,
+    trust_remote_code: bool = False,
 ) -> str:
     """
     Download a model from HuggingFace Hub using canonical CacheManager.
@@ -357,38 +413,19 @@ def download_model(
     if revision:
         console.print(f"  Revision: {revision}")
 
-    local_path = manager.download_snapshot(repo_id, revision=revision or "main", token=token)
+    local_path = manager.download_snapshot(
+        repo_id, revision=revision or "main", token=token, trust_remote_code=trust_remote_code
+    )
 
     console.print(f"\n[green]✓[/green] Model saved to: {local_path}")
 
     if enable_safety_scan:
         console.print("\n[bold]Running safety scan...[/bold]")
         try:
-            from forgeai.models.safety_scanner import scan_model_weights
-
-            scan_result = scan_model_weights(local_path)
-            if scan_result["safe"]:
-                console.print("[green]✓[/green] Safety scan passed")
-            else:
-                console.print(
-                    f"[red]✗[/red] Safety scan flagged issues:\n"
-                    f"  {scan_result.get('reason', 'Unknown')}"
-                )
-                try:
-                    import shutil
-
-                    if os.path.isdir(local_path):
-                        shutil.rmtree(local_path)
-                    elif os.path.isfile(local_path):
-                        os.remove(local_path)
-                except Exception:
-                    pass
-
-                raise ValueError(
-                    f"SECURITY BLOCK: Model safety scan failed for {repo_id}. "
-                    f"Reason: {scan_result.get('reason', 'Unknown')}"
-                )
-        except ValueError:
+            manager.scan_snapshot_or_purge(local_path, repo_id)
+            console.print("[green]✓[/green] Safety scan passed")
+        except SecurityBlockError as err:
+            console.print(f"[red]✗[/red] Safety scan flagged issues:\n  {err}")
             raise
         except Exception as e:
             console.print(f"[yellow]⚠ Safety scan skipped: {e}[/yellow]")

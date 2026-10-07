@@ -1,16 +1,13 @@
-"""forgeai chat - interactive terminal chat."""
+"""forgeai chat - interactive terminal chat (a thin client over the running daemon)."""
 
 from __future__ import annotations
 
-import os
 import shutil
 import threading
 import time
-from typing import Any
 
 import typer
 from rich.console import Console
-from rich.markup import escape
 
 console = Console()
 SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
@@ -31,8 +28,8 @@ def _startup_status_message(elapsed_seconds: float) -> str:
         )
     elapsed = int(elapsed_seconds)
     return (
-        f"Still initializing after {elapsed}s. If this keeps going, rerun with "
-        "--startup-logs to inspect engine output."
+        f"Still initializing after {elapsed}s. If this keeps going, check the daemon's "
+        "logs (forgeai serve) for engine output."
     )
 
 
@@ -87,258 +84,51 @@ class _LoadingSpinner:
         self._last_width = len(text)
 
 
-def _print_startup_profile(
-    *,
-    model: str,
-    settings,
-    stream: bool,
-    startup_logs: bool,
-) -> None:
-    """Print a concise chat startup summary."""
-
-    console.print("[bold]Startup Profile[/bold]")
-    console.print(f"  Model: {model}")
-    console.print(f"  Mode: {'streaming chat' if stream else 'chat'}")
-    console.print(f"  Tensor parallel: {settings.tensor_parallel_size}")
-    console.print(f"  GPU util: {settings.gpu_memory_utilization:.2f}")
-    console.print(f"  max_num_seqs: {settings.max_num_seqs}")
-    console.print(f"  Execution: {'eager' if settings.enforce_eager else 'compiled'}")
-    console.print(f"  max_model_len: {settings.max_model_len or 'model default'}")
-    if startup_logs:
-        console.print("[dim]Raw startup logs enabled.[/dim]\n")
-        return
-
-    if not os.environ.get("HF_TOKEN"):
-        console.print("[dim]HF_TOKEN not set; cached models still work, uncached downloads may be slower.[/dim]")
-    console.print("[dim]Raw startup logs suppressed. Use --startup-logs to show engine logs.[/dim]\n")
-
-
-async def _read_user_input() -> str:
-    """Prompt for user input without breaking the streaming event loop."""
-    import asyncio
-
-    from rich.prompt import Prompt
-
-    return (await asyncio.to_thread(Prompt.ask, "[bold blue]You[/bold blue]")).strip()
-
-
-async def _stream_chat_session(
-    engine,
-    *,
-    history: list[dict[str, str]],
-    system_prompt: str | None,
-    max_tokens: int,
-    temperature: float,
-    top_p: float,
-) -> None:
-    """Run the interactive chat loop with incremental token streaming."""
-    from forgeai.core.backends.base import StreamStats, iter_stream
-
-
-    while True:
-        try:
-            user_input = await _read_user_input()
-        except (EOFError, KeyboardInterrupt):
-            console.print("\n[yellow]Chat ended.[/yellow]")
-            break
-
-        if not user_input:
-            continue
-
-        command = user_input.lower()
-        if command in {"/exit", "/quit"}:
-            console.print("[yellow]Chat ended.[/yellow]")
-            break
-        if command == "/clear":
-            history[:] = []
-            if system_prompt:
-                history.append({"role": "system", "content": system_prompt})
-            console.print("[yellow]Chat history cleared.[/yellow]")
-            continue
-
-        history.append({"role": "user", "content": user_input})
-        prompt_text = engine.build_prompt(history)
-
-        console.print("[bold green]Assistant[/bold green]: ", end="")
-        stats = StreamStats()
-        started = time.time()
-        parts: list[str] = []
-        async for chunk in iter_stream(
-            engine,
-            prompt_text,
-            stats,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-        ):
-            parts.append(chunk)
-            print(chunk, end="", flush=True)
-        print()
-        if stats.elapsed_seconds <= 0:
-            stats.elapsed_seconds = time.time() - started
-
-        assistant_text = "".join(parts).strip() or "(empty response)"
-        if stats.completion_tokens:
-            console.print(
-                f"[dim]Tokens: {stats.total_tokens} | "
-                f"Speed: {stats.tokens_per_second:.1f} tok/s | "
-                f"Time: {stats.elapsed_seconds:.2f}s[/dim]\n"
-            )
-        else:
-            console.print()
-        history.append({"role": "assistant", "content": assistant_text})
-
-
 def chat(
     model: str = typer.Argument(..., help="Model name or HuggingFace repo ID"),
-    system_prompt: str | None = typer.Option(
-        None,
-        "--system",
-        help="Optional system prompt",
-    ),
+    system_prompt: str | None = typer.Option(None, "--system", help="Optional system prompt"),
     max_tokens: int = typer.Option(512, "--max-tokens", help="Maximum tokens to generate"),
     temperature: float = typer.Option(0.7, "--temperature", "-t", help="Sampling temperature"),
     top_p: float = typer.Option(0.95, "--top-p", help="Top-p sampling"),
-    auto_optimize: bool = typer.Option(False, "--auto-optimize", help="Auto-tune tensor parallel size"),
-    gpu_utilization: float | None = typer.Option(
-        None,
-        "--gpu-util",
-        help="GPU memory utilization (vLLM only, auto-tuned when omitted)",
-    ),
-    tensor_parallel: int | None = typer.Option(None, "--tp", help="Tensor parallel size (vLLM only)"),
     stream: bool = typer.Option(True, "--stream/--no-stream", help="Stream tokens as they are generated"),
-    startup_logs: bool = typer.Option(False, "--startup-logs", help="Show raw vLLM/HF startup logs"),
+    keep_alive: str | None = typer.Option(None, "--keep-alive", help="Engine keep_alive TTL"),
+    host: str | None = typer.Option(None, "--host", help="Daemon host"),
+    port: int | None = typer.Option(None, "--port", help="Daemon port"),
 ) -> None:
-    """Start an interactive chat session in the terminal."""
-    import asyncio
+    """Start an interactive chat session through the running ForgeAI daemon.
 
-    from rich.panel import Panel
-    from rich.prompt import Prompt
-
-    from forgeai.cli.runtime import print_runtime_tuning, resolve_runtime_tuning
-    from forgeai.core.config import DevToolSettings
+    The model is loaded by the daemon (start it with ``forgeai serve``); Ctrl-C while a
+    response is streaming cancels that response and returns to the prompt.
+    """
+    from forgeai.cli.repl import run_repl
+    from forgeai.cli.runtime import DaemonClient, DaemonClientError, handle_cli_error
     from forgeai.core.telemetry import track_event
-    from forgeai.models.zoo import resolve_model_name
 
-    resolved = resolve_model_name(model)
-    if resolved.lower().endswith(".gguf") or ".gguf" in resolved.lower():
+    if ".gguf" in model.lower():
         console.print(
-            f"[red]ERROR:[/red] GGUF model format is unsupported in ForgeAI v2.0+ (model: {resolved!r}). "
+            f"[red]ERROR:[/red] GGUF model format is unsupported in ForgeAI v2.0+ (model: {model!r}). "
             "llama.cpp has been removed in favor of vLLM. "
             "Remediation: Specify a Hugging Face repo ID or local safetensors directory."
         )
         raise typer.Exit(code=1)
 
     console.print("\n[bold cyan]ForgeAI Chat[/bold cyan]")
-    console.print(f"  Model: {resolved}")
-    console.print("  Commands: /exit, /quit, /clear\n")
+    console.print(f"  Model: {model}")
+    console.print("  Commands: /exit, /quit, /clear (Ctrl-C cancels a response)\n")
 
-    track_event("command.chat", {"model": resolved, "stream": stream})
-
-    tuning = resolve_runtime_tuning(
-        tensor_parallel_size=tensor_parallel,
-        gpu_memory_utilization=gpu_utilization,
-        auto_optimize=auto_optimize,
-        chat_mode=True,
-        model_name=resolved,
-    )
-    print_runtime_tuning(tuning)
-
-    settings_kwargs: dict[str, Any] = {
-        "model_name": resolved,
-        "tensor_parallel_size": tuning.tensor_parallel_size,
-        "gpu_memory_utilization": tuning.gpu_memory_utilization,
-        "enforce_eager": tuning.enforce_eager,
-    }
-    if tuning.max_num_seqs is not None:
-        settings_kwargs["max_num_seqs"] = tuning.max_num_seqs
-    if tuning.max_model_len is not None:
-        settings_kwargs["max_model_len"] = tuning.max_model_len
-    settings = DevToolSettings(**settings_kwargs)
-    _print_startup_profile(
-        model=resolved,
-        settings=settings,
-        stream=stream,
-        startup_logs=startup_logs,
-    )
-
-    history: list[dict[str, str]] = []
-    if system_prompt:
-        history.append({"role": "system", "content": system_prompt})
+    track_event("command.chat", {"model": model, "stream": stream})
 
     try:
-        from forgeai.core.engine import DevToolEngine
-
-        engine = DevToolEngine(
-            settings,
-            streaming=stream,
-            quiet_startup=not startup_logs,
+        client = DaemonClient(host=host, port=port)
+        run_repl(
+            client,
+            model,
+            system_prompt=system_prompt,
+            options={"num_predict": max_tokens, "temperature": temperature, "top_p": top_p},
+            keep_alive=keep_alive,
+            stream=stream,
+            prompt_label="You: ",
+            wait_indicator=lambda: _LoadingSpinner(console),
         )
-        if startup_logs:
-            console.print(
-                "[dim]Waiting for engine readiness. The chat prompt appears after startup finishes.[/dim]"
-            )
-            engine.initialize()
-            console.print("[green]OK[/green] Chat engine ready.\n")
-        else:
-            with _LoadingSpinner(console):
-                engine.initialize()
-            console.print("[green]OK[/green] Chat engine ready.\n")
-        try:
-            if stream:
-                asyncio.run(
-                    _stream_chat_session(
-                        engine,
-                        history=history,
-                        system_prompt=system_prompt,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        top_p=top_p,
-                    )
-                )
-            else:
-                while True:
-                    try:
-                        user_input = Prompt.ask("[bold blue]You[/bold blue]").strip()
-                    except (EOFError, KeyboardInterrupt):
-                        console.print("\n[yellow]Chat ended.[/yellow]")
-                        break
-
-                    if not user_input:
-                        continue
-
-                    command = user_input.lower()
-                    if command in {"/exit", "/quit"}:
-                        console.print("[yellow]Chat ended.[/yellow]")
-                        break
-                    if command == "/clear":
-                        history = []
-                        if system_prompt:
-                            history.append({"role": "system", "content": system_prompt})
-                        console.print("[yellow]Chat history cleared.[/yellow]")
-                        continue
-
-                    history.append({"role": "user", "content": user_input})
-                    prompt_text = engine.build_prompt(history)
-                    result = asyncio.run(
-                        engine.generate(
-                            prompt=prompt_text,
-                            max_tokens=max_tokens,
-                            temperature=temperature,
-                            top_p=top_p,
-                        )
-                    )
-
-                    assistant_text = result.text.strip() or "(empty response)"
-                    console.print(Panel(assistant_text, title="Assistant", border_style="green"))
-                    console.print(
-                        f"[dim]Tokens: {result.total_tokens} | "
-                        f"Speed: {result.tokens_per_second:.1f} tok/s | "
-                        f"Time: {result.elapsed_seconds:.2f}s[/dim]\n"
-                    )
-                    history.append({"role": "assistant", "content": assistant_text})
-        finally:
-            engine.shutdown()
-    except Exception as err:
-        console.print(f"\n[red]ERROR:[/red] {escape(str(err))}")
-        raise typer.Exit(code=1) from err
+    except DaemonClientError as err:
+        handle_cli_error(err)

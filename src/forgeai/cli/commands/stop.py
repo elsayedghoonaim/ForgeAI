@@ -21,17 +21,11 @@ def stop(
 ) -> None:
     try:
         client = DaemonClient(host=host, port=port)
-        client.request(
-            "POST",
-            "/api/generate",
-            json_data={
-                "model": model,
-                "prompt": "",
-                "stream": False,
-                "keep_alive": 0,
-            },
-        )
+        res = client.request("POST", "/api/unload", json_data={"model": model})
     except DaemonClientError as err:
         handle_cli_error(err)
 
-    console.print(f"stopped '{model}'")
+    if res.get("unloaded"):
+        console.print(f"stopped '{model}'")
+    else:
+        console.print(f"'{model}' was not loaded")

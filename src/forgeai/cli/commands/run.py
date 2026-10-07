@@ -88,43 +88,18 @@ def run(
                             print(response_text, end="", flush=True)
                 print(flush=True)
             else:
-                res = client.request("POST", "/api/generate", json_data=body)
+                res = client.request("POST", "/api/generate", json_data=body, long=True)
                 response_text = res.get("response", "")
                 print(response_text, flush=True)
         else:
-            while True:
-                try:
-                    user_input = input(">>> ").strip()
-                except (EOFError, KeyboardInterrupt):
-                    print()
-                    break
+            from forgeai.cli.repl import run_repl
 
-                if not user_input:
-                    continue
-
-                if user_input == "/bye":
-                    break
-
-                body = {
-                    "model": model,
-                    "prompt": user_input,
-                    "stream": stream,
-                }
-                if keep_alive is not None:
-                    body["keep_alive"] = keep_alive
-                if options_payload:
-                    body["options"] = options_payload
-
-                if stream:
-                    for chunk in client.stream("POST", "/api/generate", json_data=body):
-                        if isinstance(chunk, dict):
-                            response_text = chunk.get("response", "")
-                            if response_text:
-                                print(response_text, end="", flush=True)
-                    print(flush=True)
-                else:
-                    res = client.request("POST", "/api/generate", json_data=body)
-                    response_text = res.get("response", "")
-                    print(response_text, flush=True)
+            run_repl(
+                client,
+                model,
+                options=options_payload or None,
+                keep_alive=keep_alive,
+                stream=stream,
+            )
     except DaemonClientError as err:
         handle_cli_error(err)

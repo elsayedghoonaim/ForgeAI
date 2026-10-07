@@ -23,10 +23,12 @@ from forgeai.api.schemas.ollama import (
     OllamaOptions,
     OllamaPullRequest,
     OllamaShowRequest,
+    OllamaUnloadRequest,
 )
 from forgeai.api.streaming import guarded_stream_response
 from forgeai.core.backends.base import StreamStats, abort_request, iter_stream
 from forgeai.core.engine import is_oom_exception
+from forgeai.models.loader import SecurityBlockError
 from forgeai.models.manifest import ForgeAIManifest, validate_repo_id_string
 
 router = APIRouter()
@@ -118,28 +120,69 @@ def _is_zero_keep_alive(val: Any) -> bool:
     return bool(isinstance(val, str) and val.strip().lower() in ("0", "0.0", "0s", "0m", "0h"))
 
 
+def _model_error(model: str, err: Exception) -> JSONResponse:
+    """Map lease/resolution errors: unknown model -> 404, malformed tag -> 400."""
+    if isinstance(err, KeyError):
+        return JSONResponse(status_code=404, content={"error": f"model '{model}' not found"})
+    return JSONResponse(status_code=400, content={"error": str(err)})
+
+
+def _count_tokens(engine: Any, texts: list[str]) -> int:
+    """Token count for ``texts`` using the engine's tokenizer when one is reachable.
+
+    Falls back to a whitespace word count (a documented underestimate) when the engine
+    exposes no tokenizer or tokenization fails.
+    """
+    counter = getattr(engine, "count_tokens", None)
+    if callable(counter):
+        with suppress(Exception):
+            return int(sum(counter(t) for t in texts))
+    for holder in (engine, getattr(engine, "backend", None), getattr(engine, "_backend", None)):
+        tok = getattr(holder, "_tokenizer", None) or getattr(holder, "tokenizer", None)
+        encode = getattr(tok, "encode", None)
+        if callable(encode):
+            with suppress(Exception):
+                return sum(len(encode(t)) for t in texts)
+    return sum(len(t.split()) for t in texts)
+
+
+async def _unload_model(runtime: Any, model: str) -> tuple[bool, JSONResponse | None]:
+    """Unload ``model`` without ever loading it. Returns (was_loaded, error_response)."""
+    try:
+        key, _manifest, _record = await asyncio.to_thread(runtime.get_engine_key_for_tag, model)
+    except (KeyError, ValueError) as err:
+        return False, _model_error(model, err)
+    statuses = await runtime.engine_manager.list_async()
+    was_loaded = any(st.key == key for st in statuses)
+    await runtime.engine_manager.stop(key)
+    return was_loaded, None
+
+
+@router.post("/unload")
+async def unload(request: Request, body: OllamaUnloadRequest) -> Response:
+    """Unload a running model engine. Reports whether it was actually loaded."""
+    runtime = _get_runtime_adapter(request)
+    try:
+        model = body.model_name
+    except ValueError as err:
+        return JSONResponse(status_code=400, content={"error": str(err)})
+    was_loaded, error = await _unload_model(runtime, model)
+    if error is not None:
+        return error
+    return JSONResponse(content={"model": model, "unloaded": was_loaded})
+
+
 @router.post("/generate")
 async def generate(request: Request, body: OllamaGenerateRequest) -> Response:
     """Ollama-compatible /api/generate endpoint."""
     runtime = _get_runtime_adapter(request)
 
-    # Resource-safe stop control shape: empty prompt, stream=False, keep_alive=0
-    is_stop_shape = (
-        (not body.prompt or body.prompt == "")
-        and body.stream is False
-        and _is_zero_keep_alive(body.keep_alive)
-    )
-    if is_stop_shape:
-        try:
-            key, manifest, record = await asyncio.to_thread(
-                runtime.get_engine_key_for_tag, body.model
-            )
-        except (KeyError, ValueError):
-            return JSONResponse(
-                status_code=404,
-                content={"error": f"model '{body.model}' not found"},
-            )
-        await runtime.engine_manager.stop(key)
+    # keep_alive=0 with an empty prompt is an unload request, whatever ``stream`` says;
+    # it must never load the model.
+    if not body.prompt and _is_zero_keep_alive(body.keep_alive):
+        _, error = await _unload_model(runtime, body.model)
+        if error is not None:
+            return error
         return JSONResponse(
             content={
                 "model": body.model,
@@ -181,11 +224,8 @@ async def generate(request: Request, body: OllamaGenerateRequest) -> Response:
         lease, manifest, record, key = await runtime.acquire_lease(
             body.model, keep_alive=body.keep_alive
         )
-    except KeyError:
-        return JSONResponse(
-            status_code=404,
-            content={"error": f"model '{body.model}' not found"},
-        )
+    except (KeyError, ValueError) as err:
+        return _model_error(body.model, err)
 
     acquired = True
     try:
@@ -287,6 +327,20 @@ async def chat(request: Request, body: OllamaChatRequest) -> Response:
     """Ollama-compatible /api/chat endpoint."""
     runtime = _get_runtime_adapter(request)
 
+    if not body.messages and _is_zero_keep_alive(body.keep_alive):
+        _, error = await _unload_model(runtime, body.model)
+        if error is not None:
+            return error
+        return JSONResponse(
+            content={
+                "model": body.model,
+                "created_at": _iso_now(),
+                "message": {"role": "assistant", "content": ""},
+                "done": True,
+                "done_reason": "stop",
+            }
+        )
+
     for msg in body.messages:
         if msg.images and len(msg.images) > 0:
             return JSONResponse(
@@ -300,11 +354,8 @@ async def chat(request: Request, body: OllamaChatRequest) -> Response:
         lease, manifest, record, key = await runtime.acquire_lease(
             body.model, keep_alive=body.keep_alive
         )
-    except KeyError:
-        return JSONResponse(
-            status_code=404,
-            content={"error": f"model '{body.model}' not found"},
-        )
+    except (KeyError, ValueError) as err:
+        return _model_error(body.model, err)
 
     acquired = True
     try:
@@ -425,11 +476,8 @@ async def embed(request: Request, body: OllamaEmbedRequest) -> Response:
         lease, manifest, record, key = await runtime.acquire_lease(
             body.model, keep_alive=body.keep_alive
         )
-    except KeyError:
-        return JSONResponse(
-            status_code=404,
-            content={"error": f"model '{body.model}' not found"},
-        )
+    except (KeyError, ValueError) as err:
+        return _model_error(body.model, err)
 
     acquired = True
     try:
@@ -445,12 +493,12 @@ async def embed(request: Request, body: OllamaEmbedRequest) -> Response:
             )
         except Exception as err:
             return JSONResponse(
-                status_code=400,
+                status_code=500,
                 content={"error": f"Embedding generation failed: {err}"},
             )
 
         total_duration_ns = int((time.perf_counter() - acquire_start) * 1e9)
-        prompt_tokens = sum(len(text.split()) for text in input_texts)
+        prompt_tokens = _count_tokens(lease.engine, input_texts)
 
         return JSONResponse(
             content={
@@ -548,7 +596,7 @@ async def list_running(request: Request) -> Response:
                 "name": public_tag,
                 "model": public_tag,
                 "size": size,
-                "size_vram": 0,
+                "size_vram": 0,  # vLLM does not report per-model VRAM; clients treat 0 as unknown
                 "digest": digest,
                 "details": {
                     "format": "safetensors",
@@ -644,18 +692,36 @@ async def pull_model(request: Request, body: OllamaPullRequest) -> Response:
             runtime.model_registry.get_manifest, public_tag
         )
 
+    trust_remote_code = bool(
+        body.trust_remote_code
+        or (existing_manifest is not None and existing_manifest.engine_settings.trust_remote_code)
+    )
+
+    async def _download_and_scan() -> str:
+        """Download the snapshot, then scan it; a blocked snapshot is purged and raises."""
+        path = await asyncio.to_thread(
+            runtime.cache_manager.download_snapshot,
+            repo_id=repo_id,
+            revision="main",
+            token=None,
+            trust_remote_code=trust_remote_code,
+        )
+        await asyncio.to_thread(runtime.cache_manager.scan_snapshot_or_purge, path, repo_id)
+        return str(path)
+
+    def _new_manifest() -> ForgeAIManifest:
+        manifest = ForgeAIManifest(name=public_tag, model=repo_id, source_kind="huggingface")
+        if trust_remote_code:
+            manifest.engine_settings.trust_remote_code = True
+        return manifest
+
     if body.stream:
         async def _stream_pull():
             yield json.dumps({"status": "pulling manifest"}) + "\n"
             yield json.dumps({"status": "downloading weights"}) + "\n"
 
             try:
-                await asyncio.to_thread(
-                    runtime.cache_manager.download_snapshot,
-                    repo_id=repo_id,
-                    revision="main",
-                    token=None,
-                )
+                await _download_and_scan()
             except Exception as err:
                 yield json.dumps({"error": f"Pull failed: {err}"}) + "\n"
                 return
@@ -664,11 +730,7 @@ async def pull_model(request: Request, body: OllamaPullRequest) -> Response:
 
 
             try:
-                manifest = ForgeAIManifest(
-                    name=public_tag,
-                    model=repo_id,
-                    source_kind="huggingface",
-                )
+                manifest = _new_manifest()
                 record = await asyncio.to_thread(
                     runtime.model_registry.register_manifest,
                     manifest,
@@ -688,17 +750,8 @@ async def pull_model(request: Request, body: OllamaPullRequest) -> Response:
         return StreamingResponse(_stream_pull(), media_type="application/x-ndjson")
 
     try:
-        await asyncio.to_thread(
-            runtime.cache_manager.download_snapshot,
-            repo_id=repo_id,
-            revision="main",
-            token=None,
-        )
-        manifest = ForgeAIManifest(
-            name=public_tag,
-            model=repo_id,
-            source_kind="huggingface",
-        )
+        await _download_and_scan()
+        manifest = _new_manifest()
         record = await asyncio.to_thread(
             runtime.model_registry.register_manifest,
             manifest,
@@ -713,7 +766,8 @@ async def pull_model(request: Request, body: OllamaPullRequest) -> Response:
                     existing_manifest,
                     cache_manager=runtime.cache_manager,
                 )
-        return JSONResponse(status_code=500, content={"error": f"Pull failed: {err}"})
+        status = 403 if isinstance(err, SecurityBlockError) else 500
+        return JSONResponse(status_code=status, content={"error": f"Pull failed: {err}"})
 
 
 @router.delete("/delete")

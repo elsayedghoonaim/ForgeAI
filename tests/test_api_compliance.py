@@ -126,6 +126,7 @@ class ApiComplianceTests(unittest.IsolatedAsyncioTestCase):
             data_json = json.loads(first_chunk[6:])
             self.assertEqual(data_json["object"], "chat.completion.chunk")
             self.assertEqual(data_json["choices"][0]["delta"]["content"], "hello")
+            self.assertEqual(data_json["choices"][0]["delta"]["role"], "assistant")
 
             second_chunk = lines[1]
             self.assertTrue(second_chunk.startswith("data: "))

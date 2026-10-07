@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import time
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 router = APIRouter()
@@ -50,7 +50,7 @@ async def list_models(request: Request) -> ModelListResponse:
     return ModelListResponse(data=models)
 
 
-@router.get("/models/{model_id}")
+@router.get("/models/{model_id:path}")
 async def get_model(model_id: str, request: Request) -> ModelData:
     """Get details of a specific model."""
     runtime = getattr(request.app.state, "runtime_adapter", None)
@@ -65,12 +65,13 @@ async def get_model(model_id: str, request: Request) -> ModelData:
             return ModelData(id=record.ref.full_tag, created=int(time.time()))
         except KeyError:
             pass
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err)) from err
 
     engine = getattr(request.app.state, "engine", None)
     if engine and getattr(getattr(engine, "settings", None), "model_name", None) == model_id:
         start_time = getattr(engine, "_start_time", None) or time.time()
         return ModelData(id=model_id, created=int(start_time))
 
-    from fastapi import HTTPException
     raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
 

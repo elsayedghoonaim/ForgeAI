@@ -23,6 +23,8 @@ ENTROPY_LOW_THRESHOLD = 0.5   # Suspiciously low entropy (constant weights)
 ENTROPY_HIGH_THRESHOLD = 8.0  # Suspiciously high entropy (random noise)
 OUTLIER_RATIO_THRESHOLD = 0.05  # Max ratio of extreme outlier values
 MAX_FILE_SIZE_GB = 50  # Skip files larger than this
+PENALTY_PER_WARNING = 15
+_INFO_PREFIXES = ("Insecure PyTorch format",)
 
 
 @dataclass
@@ -81,8 +83,9 @@ def scan_model_weights(model_path: str, quick: bool = False) -> dict[str, Any]:
         result.score = 0.0
         result.safe = False
     else:
-        penalty_per_warning = 15
-        result.score = max(0, 100 - len(result.warnings) * penalty_per_warning)
+        # Penalize suspicious contents, not file counts: informational notes are free.
+        scored = [w for w in result.warnings if not w.startswith(_INFO_PREFIXES)]
+        result.score = max(0, 100 - len(scored) * PENALTY_PER_WARNING)
         result.safe = result.score >= 50
 
     result.files_scanned = len(weight_files)
@@ -152,80 +155,104 @@ def _scan_safetensors(file_path: Path, result: ScanResult) -> None:
         result.warnings.append(f"Error scanning {file_path.name}: {e}")
 
 
-def _scan_pickle_bytes(data: Any, file_name: str) -> list[str]:
-    warnings = []
-    # Blocklist of highly dangerous modules and functions
-    dangerous_modules = {
-        "os", "subprocess", "sys", "posix", "nt", "builtins", "__builtin__",
-        "ctypes", "pty", "commands", "code", "runpy", "shutil", "socket",
-        "urllib", "http", "tempfile", "platform", "pickle", "marshal", "shelve"
+# Allowlist of globals a legitimate PyTorch checkpoint may reference. Anything else (including
+# anything not recognised) is treated as unsafe: an allowlist fails closed, a blocklist doesn't.
+_SAFE_GLOBALS: dict[str, frozenset[str]] = {
+    "torch._utils": frozenset(
+        {
+            "_rebuild_tensor",
+            "_rebuild_tensor_v2",
+            "_rebuild_parameter",
+            "_rebuild_parameter_with_state",
+            "_rebuild_qtensor",
+        }
+    ),
+    "collections": frozenset({"OrderedDict"}),
+    "numpy": frozenset({"dtype", "ndarray"}),
+    "numpy.core.multiarray": frozenset({"_reconstruct", "scalar"}),
+    "numpy._core.multiarray": frozenset({"_reconstruct", "scalar"}),
+    "torch.storage": frozenset({"UntypedStorage", "TypedStorage"}),
+}
+_SAFE_TORCH_NAMES = frozenset(
+    {
+        "Size", "device", "Tensor",
+        "float16", "float32", "float64", "bfloat16", "int8", "int16", "int32", "int64",
+        "uint8", "bool", "complex64", "complex128",
     }
-    dangerous_functions = {
-        "eval", "exec", "system", "popen", "spawn", "fork", "execve",
-        "load", "loads", "__import__", "getattr", "setattr", "delattr",
-        "globals", "locals", "reduce"
-    }
+)
 
-    stack: list[str] = []
+
+def _is_safe_global(module: str, name: str) -> bool:
+    if module == "torch":
+        return name in _SAFE_TORCH_NAMES or (name.endswith("Storage") and name[:-7].isalpha())
+    return name in _SAFE_GLOBALS.get(module, frozenset())
+
+
+def _scan_pickle_bytes(data: Any, file_name: str) -> list[str]:
+    """Return ``Unsafe pickle ...`` warnings for any global outside the allowlist.
+
+    A pickle that cannot be parsed, or whose STACK_GLOBAL operands cannot be resolved
+    statically, is reported as unsafe.
+    """
+    warnings: list[str] = []
+    recent: list[str | None] = []  # string-like values pushed most recently
+    memo: dict[int, str | None] = {}
+    memo_next = 0
+    string_ops = {"SHORT_BINUNICODE", "BINUNICODE", "UNICODE", "STRING", "BINSTRING",
+                  "SHORT_BINSTRING", "BINUNICODE8"}
+
+    def _check(module: str, name: str) -> None:
+        if not _is_safe_global(module, name):
+            shown = "os" if module in ("posix", "nt") else module
+            warnings.append(f"Unsafe pickle global detected in {file_name}: '{shown}.{name}'")
+
     try:
         for opcode, arg, _pos in pickletools.genops(data):
-            if opcode.name in ("SHORT_BINUNICODE", "BINUNICODE", "UNICODE", "STRING"):
-                stack.append(arg if isinstance(arg, str) else "")
-            elif opcode.name in ("BINBYTES", "SHORT_BINBYTES"):
-                if isinstance(arg, bytes):
-                    try:
-                        stack.append(arg.decode("utf-8"))
-                    except Exception:
-                        stack.append("")
-            elif opcode.name == "GLOBAL":
-                if isinstance(arg, str):
-                    parts = arg.split(None, 1)
-                    if len(parts) == 2:
-                        module, name = parts
-                    else:
-                        module, name = parts[0], ""
-                elif isinstance(arg, tuple) and len(arg) == 2:
-                    module, name = arg
+            op = opcode.name
+            if op in string_ops:
+                recent.append(arg if isinstance(arg, str) else None)
+            elif op == "MEMOIZE":
+                memo[memo_next] = recent[-1] if recent else None
+                memo_next += 1
+            elif op in ("PUT", "BINPUT", "LONG_BINPUT"):
+                memo[int(arg or 0)] = recent[-1] if recent else None
+            elif op in ("GET", "BINGET", "LONG_BINGET"):
+                recent.append(memo.get(int(arg or 0)))
+            elif op in ("GLOBAL", "INST"):
+                if isinstance(arg, str) and " " in arg:
+                    module, name = arg.split(" ", 1)
                 else:
+                    warnings.append(f"Unsafe pickle global detected in {file_name}: {arg!r}")
                     continue
-
-                # Check against blocklists
-                if module in dangerous_modules or any(dm in module.split(".") for dm in dangerous_modules):
-                    display_module = "os" if module in ("posix", "nt") else module
+                _check(module, name)
+                recent.clear()
+            elif op == "STACK_GLOBAL":
+                if len(recent) >= 2 and recent[-1] is not None and recent[-2] is not None:
+                    _check(str(recent[-2]), str(recent[-1]))
+                else:
                     warnings.append(
-                        f"Unsafe pickle global detected in {file_name}: '{display_module}.{name}'"
+                        f"Unsafe pickle global detected in {file_name}: "
+                        "unresolvable STACK_GLOBAL operands"
                     )
-                elif name in dangerous_functions:
-                    display_module = "os" if module in ("posix", "nt") else module
-                    warnings.append(
-                        f"Unsafe pickle function detected in {file_name}: '{display_module}.{name}'"
-                    )
-            elif opcode.name == "STACK_GLOBAL" and len(stack) >= 2:
-                name = stack[-1]
-                module = stack[-2]
-                # Pop them off
-                stack.pop()
-                stack.pop()
-
-                if isinstance(module, str) and isinstance(name, str):
-                    if module in dangerous_modules or any(dm in module.split(".") for dm in dangerous_modules):
-                        display_module = "os" if module in ("posix", "nt") else module
-                        warnings.append(
-                            f"Unsafe pickle global detected in {file_name}: '{display_module}.{name}'"
-                        )
-                    elif name in dangerous_functions:
-                        display_module = "os" if module in ("posix", "nt") else module
-                        warnings.append(
-                            f"Unsafe pickle function detected in {file_name}: '{display_module}.{name}'"
-                        )
-    except Exception:
-        pass
+                recent.clear()
+            elif op in ("EXT1", "EXT2", "EXT4"):
+                warnings.append(
+                    f"Unsafe pickle global detected in {file_name}: extension registry reference"
+                )
+            elif op in ("POP", "POP_MARK", "DUP", "STOP", "MARK", "FRAME", "PROTO"):
+                continue
+            else:
+                recent.append(None)
+            if len(recent) > 8:
+                del recent[:-8]
+    except Exception as e:
+        warnings.append(f"Unsafe pickle: could not parse {file_name}: {e}")
     return warnings
 
 
 def _scan_pytorch(file_path: Path, result: ScanResult) -> None:
     """Scan a PyTorch weight file."""
-    # Always recommend safetensors for PyTorch format files
+    # Informational only; does not reduce the score (see ``_INFO_PREFIXES``).
     result.warnings.append(
         f"Insecure PyTorch format (.bin/.pt/.pth) detected in {file_path.name}. "
         f"We recommend converting to safetensors for safer and faster loading."
@@ -242,18 +269,13 @@ def _scan_pytorch(file_path: Path, result: ScanResult) -> None:
                 for member in z.namelist():
                     if member.endswith(".pkl") or "data.pkl" in member:
                         with z.open(member) as f:
-                            pickle_warnings = _scan_pickle_bytes(f, file_path.name)
-                            result.warnings.extend(pickle_warnings)
+                            result.warnings.extend(_scan_pickle_bytes(f, file_path.name))
         else:
             with open(file_path, "rb") as f:
-                pickle_warnings = _scan_pickle_bytes(f, file_path.name)
-                result.warnings.extend(pickle_warnings)
+                result.warnings.extend(_scan_pickle_bytes(f, file_path.name))
 
     except Exception as e:
-        result.warnings.append(f"Error scanning {file_path.name}: {e}")
-
-
-
+        result.warnings.append(f"Unsafe pickle: could not read {file_path.name}: {e}")
 
 
 def _to_dict(result: ScanResult) -> dict[str, Any]:

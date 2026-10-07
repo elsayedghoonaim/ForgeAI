@@ -42,8 +42,8 @@ def ps(
     for item in models:
         name = item.get("name", "")
         expires = item.get("expires_at", "N/A")
-        vram_bytes = item.get("size_vram", 0)
-        vram_str = format_size(vram_bytes) if vram_bytes > 0 else "Unknown"
+        vram_bytes = item.get("size_vram") or 0
+        vram_str = format_size(int(vram_bytes)) if isinstance(vram_bytes, (int, float)) and vram_bytes > 0 else "Unknown"
         details = item.get("details", {}) or {}
         fmt = details.get("format", "safetensors")
         quant = details.get("weight_quantization") or details.get("quantization_level", "none")

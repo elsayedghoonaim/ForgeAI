@@ -238,7 +238,7 @@ class ChatStartupStatusTests(unittest.TestCase):
 
         self.assertIn("Loading model and preparing the engine", initial)
         self.assertIn("compiling kernels", compiling)
-        self.assertIn("--startup-logs", stalled)
+        self.assertIn("daemon's logs", stalled)
 
 
 if __name__ == "__main__":
