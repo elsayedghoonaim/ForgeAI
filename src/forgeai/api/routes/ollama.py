@@ -6,7 +6,7 @@ import asyncio
 import json
 import math
 import time
-from contextlib import suppress
+from contextlib import aclosing, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -24,6 +24,8 @@ from forgeai.api.schemas.ollama import (
     OllamaPullRequest,
     OllamaShowRequest,
 )
+from forgeai.api.streaming import guarded_stream_response
+from forgeai.core.backends.base import StreamStats, abort_request, iter_stream
 from forgeai.core.engine import is_oom_exception
 from forgeai.models.manifest import ForgeAIManifest, validate_repo_id_string
 
@@ -65,6 +67,47 @@ def _parse_options(options_raw: Any) -> tuple[float, float, int, int, list[str] 
         stop = [str(s) for s in opts.stop]
 
     return temp, top_p, top_k, max_tokens, stop
+
+
+def _ndjson_stream_response(
+    runtime: Any,
+    key: Any,
+    engine: Any,
+    prompt: str,
+    *,
+    keep_alive: Any,
+    params: dict[str, Any],
+    make_chunk: Any,
+    make_terminal: Any,
+    acquire_start: float,
+) -> StreamingResponse:
+    """NDJSON streaming response with guaranteed lease release, close and abort."""
+    stats = StreamStats()
+
+    async def _events() -> Any:
+        eval_start = time.perf_counter()
+        source = iter_stream(engine, prompt, stats, **params)
+        async with aclosing(source) as chunks:  # type: ignore[type-var]
+            async for chunk in chunks:
+                yield json.dumps(make_chunk(chunk)) + "\n"
+        now = time.perf_counter()
+        total_duration_ns = int((now - acquire_start) * 1e9)
+        eval_duration_ns = int((now - eval_start) * 1e9)
+        yield json.dumps(make_terminal(stats, total_duration_ns, eval_duration_ns)) + "\n"
+
+    async def _on_error(err: Exception) -> list[str]:
+        if is_oom_exception(err):
+            with suppress(Exception):
+                await runtime.engine_manager.mark_engine_failed(key, str(err))
+        return [json.dumps({"error": str(err)}) + "\n"]
+
+    return guarded_stream_response(
+        _events(),
+        release=lambda: runtime.release_lease(key, keep_alive=keep_alive),
+        abort=lambda: abort_request(engine, stats.request_id),
+        on_error=_on_error,
+        media_type="application/x-ndjson",
+    )
 
 
 def _is_zero_keep_alive(val: Any) -> bool:
@@ -160,67 +203,49 @@ async def generate(request: Request, body: OllamaGenerateRequest) -> Response:
         temp, top_p, top_k, max_tokens, stop = _parse_options(body.options)
 
         if body.stream:
-            acquired = False  # Ownership transferred to generator finally
-            async def _stream_gen():
-                eval_start = time.perf_counter()
-                eval_count = 0
-                error_emitted = False
-                try:
-                    async for chunk in lease.engine.generate_stream(
-                        prompt=prompt,
-                        max_tokens=max_tokens,
-                        temperature=temp,
-                        top_p=top_p,
-                        stop=stop,
-                        top_k=top_k,
-                    ):
-                        eval_count += 1
-                        payload = {
-                            "model": body.model,
-                            "created_at": _iso_now(),
-                            "response": chunk,
-                            "done": False,
-                        }
-                        yield json.dumps(payload) + "\n"
+            def _chunk(text: str) -> dict[str, Any]:
+                return {
+                    "model": body.model,
+                    "created_at": _iso_now(),
+                    "response": text,
+                    "done": False,
+                }
 
-                    total_duration_ns = int((time.perf_counter() - acquire_start) * 1e9)
-                    eval_duration_ns = int((time.perf_counter() - eval_start) * 1e9)
+            def _terminal(stats: StreamStats, total_ns: int, eval_ns: int) -> dict[str, Any]:
+                return {
+                    "model": body.model,
+                    "created_at": _iso_now(),
+                    "response": "",
+                    "done": True,
+                    "done_reason": stats.finish_reason or "stop",
+                    "context": body.context or [],
+                    "total_duration": total_ns,
+                    "load_duration": load_duration_ns,
+                    "prompt_eval_count": stats.prompt_tokens,
+                    "prompt_eval_duration": max(0, total_ns - eval_ns),
+                    "eval_count": stats.completion_tokens,
+                    "eval_duration": eval_ns,
+                }
 
-                    last_res = getattr(lease.engine, "last_result", None)
-                    prompt_tokens = getattr(last_res, "prompt_tokens", 0) if last_res else 0
-                    completion_tokens = (
-                        getattr(last_res, "completion_tokens", eval_count)
-                        if last_res
-                        else eval_count
-                    )
-
-                    terminal = {
-                        "model": body.model,
-                        "created_at": _iso_now(),
-                        "response": "",
-                        "done": True,
-                        "done_reason": "stop",
-                        "context": body.context or [],
-                        "total_duration": total_duration_ns,
-                        "load_duration": load_duration_ns,
-                        "prompt_eval_count": prompt_tokens,
-                        "prompt_eval_duration": max(0, total_duration_ns - eval_duration_ns),
-                        "eval_count": completion_tokens,
-                        "eval_duration": eval_duration_ns,
-                    }
-                    yield json.dumps(terminal) + "\n"
-
-                except Exception as err:
-                    if not error_emitted:
-                        error_emitted = True
-                        if is_oom_exception(err):
-                            with suppress(Exception):
-                                await runtime.engine_manager.mark_engine_failed(key, str(err))
-                        yield json.dumps({"error": str(err)}) + "\n"
-                finally:
-                    await runtime.release_lease(key, keep_alive=body.keep_alive)
-
-            return StreamingResponse(_stream_gen(), media_type="application/x-ndjson")
+            response = _ndjson_stream_response(
+                runtime,
+                key,
+                lease.engine,
+                prompt,
+                keep_alive=body.keep_alive,
+                params={
+                    "max_tokens": max_tokens,
+                    "temperature": temp,
+                    "top_p": top_p,
+                    "stop": stop,
+                    "top_k": top_k,
+                },
+                make_chunk=_chunk,
+                make_terminal=_terminal,
+                acquire_start=acquire_start,
+            )
+            acquired = False  # Ownership transferred to the guarded response
+            return response
 
         gen_start = time.perf_counter()
         result = await lease.engine.generate(
@@ -293,66 +318,48 @@ async def chat(request: Request, body: OllamaChatRequest) -> Response:
         temp, top_p, top_k, max_tokens, stop = _parse_options(body.options)
 
         if body.stream:
-            acquired = False  # Ownership transferred to generator finally
-            async def _stream_chat():
-                eval_start = time.perf_counter()
-                eval_count = 0
-                error_emitted = False
-                try:
-                    async for chunk in lease.engine.generate_stream(
-                        prompt=prompt,
-                        max_tokens=max_tokens,
-                        temperature=temp,
-                        top_p=top_p,
-                        stop=stop,
-                        top_k=top_k,
-                    ):
-                        eval_count += 1
-                        payload = {
-                            "model": body.model,
-                            "created_at": _iso_now(),
-                            "message": {"role": "assistant", "content": chunk},
-                            "done": False,
-                        }
-                        yield json.dumps(payload) + "\n"
+            def _chat_chunk(text: str) -> dict[str, Any]:
+                return {
+                    "model": body.model,
+                    "created_at": _iso_now(),
+                    "message": {"role": "assistant", "content": text},
+                    "done": False,
+                }
 
-                    total_duration_ns = int((time.perf_counter() - acquire_start) * 1e9)
-                    eval_duration_ns = int((time.perf_counter() - eval_start) * 1e9)
+            def _chat_terminal(stats: StreamStats, total_ns: int, eval_ns: int) -> dict[str, Any]:
+                return {
+                    "model": body.model,
+                    "created_at": _iso_now(),
+                    "message": {"role": "assistant", "content": ""},
+                    "done": True,
+                    "done_reason": stats.finish_reason or "stop",
+                    "total_duration": total_ns,
+                    "load_duration": load_duration_ns,
+                    "prompt_eval_count": stats.prompt_tokens,
+                    "prompt_eval_duration": max(0, total_ns - eval_ns),
+                    "eval_count": stats.completion_tokens,
+                    "eval_duration": eval_ns,
+                }
 
-                    last_res = getattr(lease.engine, "last_result", None)
-                    prompt_tokens = getattr(last_res, "prompt_tokens", 0) if last_res else 0
-                    completion_tokens = (
-                        getattr(last_res, "completion_tokens", eval_count)
-                        if last_res
-                        else eval_count
-                    )
-
-                    terminal = {
-                        "model": body.model,
-                        "created_at": _iso_now(),
-                        "message": {"role": "assistant", "content": ""},
-                        "done": True,
-                        "done_reason": "stop",
-                        "total_duration": total_duration_ns,
-                        "load_duration": load_duration_ns,
-                        "prompt_eval_count": prompt_tokens,
-                        "prompt_eval_duration": max(0, total_duration_ns - eval_duration_ns),
-                        "eval_count": completion_tokens,
-                        "eval_duration": eval_duration_ns,
-                    }
-                    yield json.dumps(terminal) + "\n"
-
-                except Exception as err:
-                    if not error_emitted:
-                        error_emitted = True
-                        if is_oom_exception(err):
-                            with suppress(Exception):
-                                await runtime.engine_manager.mark_engine_failed(key, str(err))
-                        yield json.dumps({"error": str(err)}) + "\n"
-                finally:
-                    await runtime.release_lease(key, keep_alive=body.keep_alive)
-
-            return StreamingResponse(_stream_chat(), media_type="application/x-ndjson")
+            response = _ndjson_stream_response(
+                runtime,
+                key,
+                lease.engine,
+                prompt,
+                keep_alive=body.keep_alive,
+                params={
+                    "max_tokens": max_tokens,
+                    "temperature": temp,
+                    "top_p": top_p,
+                    "stop": stop,
+                    "top_k": top_k,
+                },
+                make_chunk=_chat_chunk,
+                make_terminal=_chat_terminal,
+                acquire_start=acquire_start,
+            )
+            acquired = False  # Ownership transferred to the guarded response
+            return response
 
         gen_start = time.perf_counter()
         result = await lease.engine.generate(

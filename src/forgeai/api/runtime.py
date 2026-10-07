@@ -32,6 +32,10 @@ class SharedRuntimeAdapter:
         self.model_registry = model_registry or ModelRegistry()
         self.cache_manager = cache_manager or CacheManager()
         self._key_to_tag: dict[EngineKey, str] = {}
+        # Keep the key->tag map bounded: drop entries when the engine is unloaded.
+        add_listener = getattr(self.engine_manager, "add_unload_listener", None)
+        if add_listener is not None:
+            add_listener(lambda key: self._key_to_tag.pop(key, None))
 
     def resolve_tag(self, tag: str | None) -> str:
         """Resolve requested model tag to full tag format (name:tag_version)."""
@@ -56,12 +60,10 @@ class SharedRuntimeAdapter:
 
     def build_engine_key(self, manifest: ForgeAIManifest, record: ModelRecord) -> EngineKey:
         """Construct deterministic EngineKey from manifest and record."""
-        snapshot_path = record.snapshot_path
-        repo_id = (
-            snapshot_path
-            if snapshot_path and record.size_bytes > 0
-            else manifest.model
-        )
+        # The key must not depend on download state (the snapshot path/size changes once the
+        # model is pulled), otherwise the same model would be loaded twice. Identity comes
+        # from the model id, revision and manifest digest only.
+        repo_id = manifest.model
 
         chat_template_digest = (
             hashlib.sha256(manifest.chat_template.encode("utf-8")).hexdigest()
@@ -71,7 +73,7 @@ class SharedRuntimeAdapter:
 
         # Snapshot identity combines resolved snapshot path, revision, and manifest digest
         snapshot_identity = hashlib.sha256(
-            f"{snapshot_path}:{manifest.revision}:{record.ref.digest}".encode()
+            f"{manifest.model}:{manifest.revision}:{record.ref.digest}".encode()
         ).hexdigest()
 
         key = EngineKey(
@@ -94,8 +96,6 @@ class SharedRuntimeAdapter:
             device_runtime_id="cuda:0",
         )
 
-
-        self._key_to_tag[key] = record.ref.full_tag
         return key
 
     def get_engine_key_for_tag(
@@ -116,6 +116,7 @@ class SharedRuntimeAdapter:
         """Pre-acquire an engine lease before returning HTTP responses."""
         key, manifest, record = self.get_engine_key_for_tag(tag)
         lease = await self.engine_manager.acquire(key, keep_alive=keep_alive)
+        self._key_to_tag[key] = record.ref.full_tag
         return lease, manifest, record, key
 
     async def release_lease(self, key: EngineKey, keep_alive: Any = None) -> None:

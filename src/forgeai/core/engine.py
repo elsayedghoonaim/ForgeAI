@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import gc
 import inspect
+import logging
 import math
 import os
 import re
@@ -18,11 +20,12 @@ from typing import Any
 
 from rich.console import Console
 
-from forgeai.core.backends.base import BaseBackend, GenerationResult
+from forgeai.core.backends.base import BaseBackend, GenerationResult, StreamStats
 from forgeai.core.backends.base import EngineStatus as LegacyEngineStatus
 from forgeai.core.config import DevToolSettings, QuantizationType
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 class EngineManagerError(RuntimeError):
@@ -315,6 +318,10 @@ class EngineLease:
     drained_event: asyncio.Event = field(default_factory=asyncio.Event)
     cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     cleaned_up: bool = False
+    # In-flight cleanup (kept so stop()/shutdown can await it instead of returning early).
+    cleanup_task: asyncio.Task[None] | None = None
+    # Set when stop() timed out draining: unload as soon as the last lease is released.
+    unload_when_idle: bool = False
 
     def remaining_keep_alive_seconds(self, now: float | None = None) -> float | None:
         """Return remaining keep_alive TTL in seconds, or None if active/indefinite."""
@@ -481,6 +488,8 @@ class EngineManager:
         self._load_semaphore: asyncio.Semaphore = asyncio.Semaphore(self.load_concurrency)
         self._timer_tasks: dict[EngineKey, asyncio.Task[None]] = {}
         self._in_progress_loads: set[asyncio.Task[Any]] = set()
+        self._cleanup_tasks: set[asyncio.Task[Any]] = set()
+        self._unload_listeners: list[Callable[[EngineKey], None]] = []
         self._queued_loads_count: int = 0
 
     @property
@@ -488,6 +497,47 @@ class EngineManager:
         """Return True if supervisor is shutting down."""
         return self._shutting_down
 
+
+    def add_unload_listener(self, listener: Callable[[EngineKey], None]) -> None:
+        """Register a callback invoked (synchronously) after an engine entry is removed."""
+        self._unload_listeners.append(listener)
+
+    def _track_task(self, task: asyncio.Task[Any]) -> None:
+        self._cleanup_tasks.add(task)
+        task.add_done_callback(self._cleanup_tasks.discard)
+
+    def _start_cleanup(self, key: EngineKey, entry: EngineLease) -> asyncio.Task[None]:
+        """Start (once) the cleanup task for ``entry``. Caller sets entry.state first."""
+        if entry.cleanup_task is None:
+            task = asyncio.create_task(self._cleanup_and_remove(key, entry))
+            entry.cleanup_task = task
+            self._track_task(task)
+        return entry.cleanup_task
+
+    async def _cleanup_and_remove(self, key: EngineKey, entry: EngineLease) -> None:
+        try:
+            await perform_lease_cleanup(entry, self.cleanup_hook)
+        finally:
+            async with self._lock:
+                removed = self._entries.get(key) is entry
+                if removed:
+                    self._entries.pop(key, None)
+            if removed:
+                for listener in list(self._unload_listeners):
+                    with contextlib.suppress(Exception):
+                        listener(key)
+
+    @staticmethod
+    async def _await_cleanup(task: asyncio.Task[None] | None) -> None:
+        """Await a cleanup task without letting caller cancellation interrupt it."""
+        if task is not None:
+            await asyncio.shield(task)
+
+    async def _run_tracked(self, coro: Any) -> None:
+        """Run ``coro`` as a tracked task that survives caller cancellation."""
+        task = asyncio.ensure_future(coro)
+        self._track_task(task)
+        await asyncio.shield(task)
 
     async def _guarded_instantiate(self, key: EngineKey) -> Any:
         """Instantiate engine while acquiring and holding load_concurrency semaphore."""
@@ -598,10 +648,6 @@ class EngineManager:
 
         # Leader execution path
         assert attempt is not None
-        current_task = asyncio.current_task()
-        if current_task is not None:
-            self._in_progress_loads.add(current_task)
-
         factory_task: asyncio.Task[Any] | None = None
         constructed_engine: Any = None
 
@@ -610,15 +656,14 @@ class EngineManager:
                 await self._enforce_capacity_for_leader(key)
 
                 fits = await self._call_admission_estimator(key)
-                if not fits:
-                    evicted = await self._evict_one_idle_lru()
-                    if evicted:
-                        fits = await self._call_admission_estimator(key)
-                    if not fits:
+                while not fits:
+                    # Evict idle engines (LRU first) until the model fits or none are left.
+                    if not await self._evict_one_idle_lru():
                         raise AdmissionVRAMError(
                             "Requested model fails VRAM admission check.",
                             code="ERR_ADMISSION_VRAM",
                         )
+                    fits = await self._call_admission_estimator(key)
 
                 async with self._lock:
                     if self._shutting_down:
@@ -676,7 +721,9 @@ class EngineManager:
                     )
 
             if temp_lease_to_cleanup is not None:
-                await perform_lease_cleanup(temp_lease_to_cleanup, self.cleanup_hook)
+                await self._run_tracked(
+                    perform_lease_cleanup(temp_lease_to_cleanup, self.cleanup_hook)
+                )
                 assert error_to_raise is not None
                 attempt.set_exception(error_to_raise)
                 raise error_to_raise
@@ -696,10 +743,14 @@ class EngineManager:
                         temp_lease_cancel = e
 
             if temp_lease_cancel is not None:
-                await perform_lease_cleanup(temp_lease_cancel, self.cleanup_hook)
+                await self._run_tracked(
+                    perform_lease_cleanup(temp_lease_cancel, self.cleanup_hook)
+                )
 
             if constructed_engine is not None:
-                await safe_async_cleanup(constructed_engine, self.cleanup_hook)
+                await self._run_tracked(
+                    safe_async_cleanup(constructed_engine, self.cleanup_hook)
+                )
             elif factory_task is not None:
                 cleanup_task = asyncio.create_task(
                     _orphan_cleanup_worker(factory_task, self.cleanup_hook)
@@ -724,7 +775,9 @@ class EngineManager:
                         temp_lease_fail = e
 
             if temp_lease_fail is not None:
-                await perform_lease_cleanup(temp_lease_fail, self.cleanup_hook)
+                await self._run_tracked(
+                    perform_lease_cleanup(temp_lease_fail, self.cleanup_hook)
+                )
 
             if is_oom_exception(exc):
                 oom_err = EngineOOMError(
@@ -736,8 +789,6 @@ class EngineManager:
             attempt.set_exception(exc)
             raise
         finally:
-            if current_task is not None:
-                self._in_progress_loads.discard(current_task)
             if factory_task is not None:
                 self._in_progress_loads.discard(factory_task)
 
@@ -752,42 +803,33 @@ class EngineManager:
                 res = await res
         return bool(res)
 
-    async def _enforce_capacity_for_leader(self, key: EngineKey) -> None:
-        async with self._lock:
-            capacity_count = sum(
-                1
-                for k, e in self._entries.items()
-                if k != key
-                and (
-                    e.is_admitted
-                    or e.state in (EngineState.READY, EngineState.DRAINING, EngineState.UNLOADING)
-                )
+    def _capacity_count_locked(self, key: EngineKey) -> int:
+        return sum(
+            1
+            for k, e in self._entries.items()
+            if k != key
+            and (
+                e.is_admitted
+                or e.state in (EngineState.READY, EngineState.DRAINING, EngineState.UNLOADING)
             )
-            if capacity_count < self.max_loaded_models:
-                return
+        )
 
-        evicted = await self._evict_one_idle_lru()
-        if not evicted:
+    async def _enforce_capacity_for_leader(self, key: EngineKey) -> None:
+        while True:
             async with self._lock:
-                capacity_count = sum(
-                    1
-                    for k, e in self._entries.items()
-                    if k != key
-                    and (
-                        e.is_admitted
-                        or e.state
-                        in (EngineState.READY, EngineState.DRAINING, EngineState.UNLOADING)
-                    )
-                )
-                if capacity_count >= self.max_loaded_models:
-                    raise AdmissionVRAMError(
-                        "Requested model requires more GPU VRAM or capacity than currently available.",
-                        code="ERR_ADMISSION_VRAM",
-                    )
+                if self._capacity_count_locked(key) < self.max_loaded_models:
+                    return
+            if not await self._evict_one_idle_lru():
+                async with self._lock:
+                    if self._capacity_count_locked(key) >= self.max_loaded_models:
+                        raise AdmissionVRAMError(
+                            "Requested model requires more GPU VRAM or capacity than currently available.",
+                            code="ERR_ADMISSION_VRAM",
+                        )
+                    return
 
     async def _evict_one_idle_lru(self) -> bool:
-        target_lease: EngineLease | None = None
-        target_key: EngineKey | None = None
+        cleanup: asyncio.Task[None] | None = None
 
         async with self._lock:
             idle_entries = [
@@ -798,18 +840,14 @@ class EngineManager:
             if not idle_entries:
                 return False
             idle_entries.sort(key=lambda item: item[1].last_accessed_at)
-            target_key, target_lease = idle_entries[0]
-            target_lease.state = EngineState.UNLOADING
+            target_key, target = idle_entries[0]
+            target.state = EngineState.UNLOADING
             timer = self._timer_tasks.pop(target_key, None)
             if timer and not timer.done():
                 timer.cancel()
+            cleanup = self._start_cleanup(target_key, target)
 
-        if target_lease is not None:
-            await perform_lease_cleanup(target_lease, self.cleanup_hook)
-
-        async with self._lock:
-            if target_key is not None:
-                self._entries.pop(target_key, None)
+        await self._await_cleanup(cleanup)
         return True
 
     async def _instantiate_engine(self, key: EngineKey) -> Any:
@@ -830,7 +868,7 @@ class EngineManager:
 
     async def release(self, key: EngineKey, keep_alive: Any = None) -> None:
         """Release an engine lease reference and schedule keep_alive TTL eviction."""
-        to_unload_lease: EngineLease | None = None
+        cleanup_task: asyncio.Task[None] | None = None
         async with self._lock:
             entry = self._entries.get(key)
             if entry is None:
@@ -846,9 +884,11 @@ class EngineManager:
             if entry.state == EngineState.DRAINING:
                 if entry.ref_count == 0:
                     entry.drained_event.set()
-                return
-
-            if entry.state == EngineState.READY and entry.ref_count == 0:
+                    if entry.unload_when_idle:
+                        # stop() gave up waiting; the last lease holder triggers the unload.
+                        entry.state = EngineState.UNLOADING
+                        cleanup_task = self._start_cleanup(key, entry)
+            elif entry.state == EngineState.READY and entry.ref_count == 0:
                 timer = self._timer_tasks.pop(key, None)
                 if timer and not timer.done():
                     timer.cancel()
@@ -856,21 +896,24 @@ class EngineManager:
                 policy = entry.keep_alive_policy or parse_keep_alive(self.default_keep_alive)
                 if policy.is_immediate_unload:
                     entry.state = EngineState.UNLOADING
-                    to_unload_lease = entry
+                    cleanup_task = self._start_cleanup(key, entry)
                 elif policy.is_indefinite:
                     pass
                 elif policy.ttl_seconds > 0:
-                    self._timer_tasks[key] = asyncio.create_task(
+                    timer_task = asyncio.create_task(
                         self._schedule_ttl_eviction(key, policy.ttl_seconds)
                     )
+                    self._timer_tasks[key] = timer_task
+                    timer_task.add_done_callback(functools.partial(self._forget_timer, key))
 
-        if to_unload_lease is not None:
-            await perform_lease_cleanup(to_unload_lease, self.cleanup_hook)
-            async with self._lock:
-                self._entries.pop(key, None)
+        await self._await_cleanup(cleanup_task)
+
+    def _forget_timer(self, key: EngineKey, task: asyncio.Task[None]) -> None:
+        if self._timer_tasks.get(key) is task:
+            self._timer_tasks.pop(key, None)
 
     async def _schedule_ttl_eviction(self, key: EngineKey, ttl_seconds: float) -> None:
-        to_unload_lease: EngineLease | None = None
+        cleanup_task: asyncio.Task[None] | None = None
         try:
             await asyncio.sleep(ttl_seconds)
         except asyncio.CancelledError:
@@ -880,63 +923,75 @@ class EngineManager:
             entry = self._entries.get(key)
             if entry is not None and entry.state == EngineState.READY and entry.ref_count == 0:
                 entry.state = EngineState.UNLOADING
-                to_unload_lease = entry
+                cleanup_task = self._start_cleanup(key, entry)
 
-        if to_unload_lease is not None:
-            await perform_lease_cleanup(to_unload_lease, self.cleanup_hook)
-            async with self._lock:
-                self._entries.pop(key, None)
+        await self._await_cleanup(cleanup_task)
 
     async def stop(
         self, key_or_tag: EngineKey | str, drain_timeout: float = 10.0
     ) -> None:
-        """Transition engine to DRAINING, await request completion, then unload."""
+        """Drain an engine, then unload it once no leases remain.
+
+        If leases are still active after ``drain_timeout`` the engine is NOT unloaded
+        under them: it stays DRAINING (refusing new leases) and unloads when the last
+        lease is released.
+        """
         target_key: EngineKey | None = None
-        target_lease: EngineLease | None = None
+        target: EngineLease | None = None
 
         async with self._lock:
             for k, entry in self._entries.items():
                 if isinstance(key_or_tag, EngineKey):
-                    if k == key_or_tag:
-                        target_key = k
-                        target_lease = entry
-                        break
-                elif isinstance(key_or_tag, str) and (
-                    k.repo_id == key_or_tag or k.snapshot_hash == key_or_tag
-                ):
-                    target_key = k
-                    target_lease = entry
+                    matched = k == key_or_tag
+                else:
+                    matched = k.repo_id == key_or_tag or k.snapshot_hash == key_or_tag
+                if matched:
+                    target_key, target = k, entry
                     break
 
-            if target_key is None or target_lease is None:
+            if target_key is None or target is None:
                 return
 
-            if target_lease.state in (EngineState.UNLOADING, EngineState.FAILED):
-                return
+            if target.state in (EngineState.UNLOADING, EngineState.FAILED):
+                in_progress = target.cleanup_task
+            else:
+                in_progress = None
+                target.state = EngineState.DRAINING
+                timer = self._timer_tasks.pop(target_key, None)
+                if timer and not timer.done():
+                    timer.cancel()
+                if target.ref_count == 0:
+                    target.drained_event.set()
 
-            target_lease.state = EngineState.DRAINING
-            timer = self._timer_tasks.pop(target_key, None)
-            if timer and not timer.done():
-                timer.cancel()
+        if target.state in (EngineState.UNLOADING, EngineState.FAILED):
+            # Cleanup already underway (or nothing to do): wait for it, don't return early.
+            await self._await_cleanup(in_progress)
+            return
 
-            if target_lease.ref_count == 0:
-                target_lease.drained_event.set()
-
-        if target_lease.ref_count > 0:
+        if target.ref_count > 0:
             with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(target_lease.drained_event.wait(), timeout=drain_timeout)
+                await asyncio.wait_for(target.drained_event.wait(), timeout=drain_timeout)
 
+        cleanup_task: asyncio.Task[None] | None = None
         async with self._lock:
-            target_lease.state = EngineState.UNLOADING
+            if target.ref_count > 0:
+                logger.warning(
+                    "Engine %s still has %d active lease(s) after %.1fs drain timeout; "
+                    "it will be unloaded when the last lease is released.",
+                    target_key.repo_id,
+                    target.ref_count,
+                    drain_timeout,
+                )
+                target.unload_when_idle = True
+                return
+            if target.state == EngineState.DRAINING:
+                target.state = EngineState.UNLOADING
+            cleanup_task = self._start_cleanup(target_key, target)
 
-        await perform_lease_cleanup(target_lease, self.cleanup_hook)
-
-        async with self._lock:
-            self._entries.pop(target_key, None)
+        await self._await_cleanup(cleanup_task)
 
     async def mark_engine_failed(self, key: EngineKey, reason: str = "") -> None:
         """Mark a READY engine as FAILED and perform immediate cleanup."""
-        target_lease: EngineLease | None = None
         async with self._lock:
             entry = self._entries.get(key)
             if entry is None:
@@ -945,12 +1000,9 @@ class EngineManager:
             timer = self._timer_tasks.pop(key, None)
             if timer and not timer.done():
                 timer.cancel()
-            target_lease = entry
+            cleanup_task = self._start_cleanup(key, entry)
 
-        await perform_lease_cleanup(target_lease, self.cleanup_hook)
-
-        async with self._lock:
-            self._entries.pop(key, None)
+        await self._await_cleanup(cleanup_task)
 
     async def list_async(self) -> list[EngineStatus]:
         """Return a lock-safe status snapshot list of all managed engines."""
@@ -1004,17 +1056,25 @@ class EngineManager:
             await asyncio.gather(*timers, return_exceptions=True)
         self._timer_tasks.clear()
 
+        # Wait for factory/load tasks (not caller request tasks) and any in-flight cleanup.
         while True:
-            loads = list(self._in_progress_loads)
-            if not loads:
-                break
-            await asyncio.gather(*loads, return_exceptions=True)
+            pending = list(self._in_progress_loads) + list(self._cleanup_tasks)
+            if not pending:
+                # One more loop turn so loaders resumed by the tasks above can register cleanup.
+                await asyncio.sleep(0)
+                if not self._in_progress_loads and not self._cleanup_tasks:
+                    break
+                continue
+            await asyncio.gather(*pending, return_exceptions=True)
 
         async with self._lock:
             keys_to_stop = list(self._entries.keys())
 
         for key in keys_to_stop:
             await self.stop(key, drain_timeout=2.0)
+
+        while self._cleanup_tasks:
+            await asyncio.gather(*list(self._cleanup_tasks), return_exceptions=True)
 
         await self._shutdown_global_runtime()
 
@@ -1059,7 +1119,7 @@ class DevToolEngine:
         self._backend: BaseBackend | None = None
         self._requests_served = 0
         self._start_time: float | None = None
-        self._last_result: GenerationResult | None = None
+        # Only used for backends that are not concurrency-safe (e.g. the sync LLM path).
         self._lock = asyncio.Lock()
 
     @property
@@ -1072,9 +1132,14 @@ class DevToolEngine:
         return self._backend is not None and self._backend.supports_streaming
 
     @property
-    def last_result(self) -> GenerationResult | None:
-        """Most recent generation result, including streamed requests."""
-        return self._last_result
+    def supports_concurrency(self) -> bool:
+        """Whether the backend allows overlapping generation requests."""
+        return self._backend is not None and self._backend.supports_concurrency
+
+    async def abort(self, request_id: str) -> None:
+        """Abort an in-flight request on the backend (no-op if unsupported)."""
+        if self._backend is not None:
+            await self._backend.abort(request_id)
 
     def initialize(self) -> None:
         """Initialize the configured backend."""
@@ -1107,19 +1172,24 @@ class DevToolEngine:
         if not self.is_running or not self._backend:
             raise RuntimeError("Engine is not initialized. Call initialize() first.")
 
-        start = time.time()
-        async with self._lock:
-            result = await self._backend.generate(
-                prompt,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                stop=stop,
-                top_k=top_k,
-            )
+        backend = self._backend
+        params: dict[str, Any] = {
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "stop": stop,
+            "top_k": top_k,
+        }
+        if backend.supports_concurrency:
+            start = time.time()
+            result = await backend.generate(prompt, **params)
+        else:
+            async with self._lock:
+                # Time only the generation, not the wait for the lock.
+                start = time.time()
+                result = await backend.generate(prompt, **params)
         result.elapsed_seconds = time.time() - start
         self._requests_served += 1
-        self._last_result = result
         return result
 
     async def generate_stream(
@@ -1132,6 +1202,33 @@ class DevToolEngine:
         top_k: int | None = None,
     ) -> AsyncIterator[str]:
         """Stream output deltas from the async runtime."""
+        async for chunk in self.stream_with_stats(
+            prompt,
+            stats=StreamStats(),
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            stop=stop,
+            top_k=top_k,
+        ):
+            yield chunk
+
+    async def stream_with_stats(
+        self,
+        prompt: str,
+        *,
+        stats: StreamStats,
+        max_tokens: int = 512,
+        temperature: float = 0.7,
+        top_p: float = 0.95,
+        stop: list[str] | None = None,
+        top_k: int | None = None,
+    ) -> AsyncIterator[str]:
+        """Stream deltas; per-request stats (tokens, finish reason, timing) land in ``stats``.
+
+        No lock is ever held across a ``yield``. Backends that are not concurrency-safe
+        are drained under the lock into a buffer first, then replayed.
+        """
         if not self.is_running or not self._backend:
             raise RuntimeError("Engine is not initialized. Call initialize() first.")
 
@@ -1140,37 +1237,34 @@ class DevToolEngine:
                 "Streaming is not supported by the active backend."
             )
 
-        prompt_tokens = 0
-        completion_tokens = 0
-        finish_reason = "stop"
-        chunks: list[str] = []
-        self._last_result = None
-        start = time.time()
+        backend = self._backend
+        params: dict[str, Any] = {
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "stop": stop,
+            "top_k": top_k,
+        }
 
+        if backend.supports_concurrency:
+            start = time.time()
+            try:
+                async for chunk in backend.stream_with_stats(prompt, stats=stats, **params):
+                    yield chunk
+            finally:
+                stats.elapsed_seconds = time.time() - start
+            self._requests_served += 1
+            return
+
+        buffered: list[str] = []
         async with self._lock:
-            async for chunk in self._backend.generate_stream(
-                prompt,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                top_p=top_p,
-                stop=stop,
-                top_k=top_k,
-            ):
-
-                chunks.append(chunk)
-                completion_tokens += 1
-                yield chunk
-
-        elapsed = time.time() - start
+            start = time.time()
+            async for chunk in backend.stream_with_stats(prompt, stats=stats, **params):
+                buffered.append(chunk)
+            stats.elapsed_seconds = time.time() - start
         self._requests_served += 1
-        self._last_result = GenerationResult(
-            text="".join(chunks),
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=prompt_tokens + completion_tokens,
-            finish_reason=finish_reason,
-            elapsed_seconds=elapsed,
-        )
+        for chunk in buffered:
+            yield chunk
 
     def get_status(self) -> LegacyEngineStatus:
         """Get current engine status."""

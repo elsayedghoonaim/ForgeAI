@@ -15,6 +15,8 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.prompt import Prompt
 
+from forgeai.core.backends.base import StreamStats, iter_stream
+
 console = Console()
 SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
@@ -158,22 +160,29 @@ async def _stream_chat_session(
         prompt_text = engine.build_prompt(history)
 
         console.print("[bold green]Assistant[/bold green]: ", end="")
-        async for chunk in engine.generate_stream(
-            prompt=prompt_text,
+        stats = StreamStats()
+        started = time.time()
+        parts: list[str] = []
+        async for chunk in iter_stream(
+            engine,
+            prompt_text,
+            stats,
             max_tokens=max_tokens,
             temperature=temperature,
             top_p=top_p,
         ):
+            parts.append(chunk)
             print(chunk, end="", flush=True)
         print()
+        if stats.elapsed_seconds <= 0:
+            stats.elapsed_seconds = time.time() - started
 
-        result = engine.last_result
-        assistant_text = (result.text.strip() if result is not None else "") or "(empty response)"
-        if result is not None:
+        assistant_text = "".join(parts).strip() or "(empty response)"
+        if stats.completion_tokens:
             console.print(
-                f"[dim]Tokens: {result.total_tokens} | "
-                f"Speed: {result.tokens_per_second:.1f} tok/s | "
-                f"Time: {result.elapsed_seconds:.2f}s[/dim]\n"
+                f"[dim]Tokens: {stats.total_tokens} | "
+                f"Speed: {stats.tokens_per_second:.1f} tok/s | "
+                f"Time: {stats.elapsed_seconds:.2f}s[/dim]\n"
             )
         else:
             console.print()
