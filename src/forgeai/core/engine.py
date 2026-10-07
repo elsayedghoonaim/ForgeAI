@@ -1016,6 +1016,29 @@ class EngineManager:
         for key in keys_to_stop:
             await self.stop(key, drain_timeout=2.0)
 
+        await self._shutdown_global_runtime()
+
+    async def _shutdown_global_runtime(self) -> None:
+        """Shut down process-global Ray state, only when no engines remain.
+
+        Individual backends must not call ``ray.shutdown()`` because it would break every
+        other tensor-parallel engine that is still loaded.
+        """
+        async with self._lock:
+            if self._entries:
+                return
+
+        def _shutdown_ray() -> None:
+            try:
+                import ray
+            except ImportError:
+                return
+            with contextlib.suppress(Exception):
+                if ray.is_initialized():
+                    ray.shutdown()
+
+        await asyncio.to_thread(_shutdown_ray)
+
 
 class DevToolEngine:
     """
@@ -1086,7 +1109,14 @@ class DevToolEngine:
 
         start = time.time()
         async with self._lock:
-            result = await self._backend.generate(prompt, max_tokens, temperature, top_p, stop, top_k)
+            result = await self._backend.generate(
+                prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                stop=stop,
+                top_k=top_k,
+            )
         result.elapsed_seconds = time.time() - start
         self._requests_served += 1
         self._last_result = result
@@ -1119,7 +1149,12 @@ class DevToolEngine:
 
         async with self._lock:
             async for chunk in self._backend.generate_stream(
-                prompt, max_tokens, temperature, top_p, stop, top_k
+                prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                stop=stop,
+                top_k=top_k,
             ):
 
                 chunks.append(chunk)

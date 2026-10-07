@@ -91,11 +91,14 @@ def test_python_source_no_runtime_llamacpp_symbols() -> None:
                     )
 
             # Check AST Attribute references for runtime symbol access (e.g. module.LlamaCppBackend)
-            elif isinstance(node, ast.Attribute):
-                if node.attr in forbidden_symbols and node.attr != "reject_legacy_llamacpp_options":
-                    violations.append(
-                        f"{rel_path}:{node.lineno} - Forbidden attribute access: '.{node.attr}'"
-                    )
+            elif (
+                isinstance(node, ast.Attribute)
+                and node.attr in forbidden_symbols
+                and node.attr != "reject_legacy_llamacpp_options"
+            ):
+                violations.append(
+                    f"{rel_path}:{node.lineno} - Forbidden attribute access: '.{node.attr}'"
+                )
 
     assert not violations, "Found forbidden runtime llama.cpp/GGUF symbols in src/:\n" + "\n".join(violations)
 
@@ -267,9 +270,8 @@ def test_backend_factory_and_config_no_auto_or_llama_selection() -> None:
     for node in ast.walk(config_tree):
         if isinstance(node, ast.ClassDef) and node.name == "BackendType":
             for stmt in node.body:
-                if isinstance(stmt, ast.Assign):
-                    if isinstance(stmt.value, ast.Constant):
-                        backend_enum_values.append(stmt.value.value)
+                if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Constant):
+                    backend_enum_values.append(stmt.value.value)
 
     assert backend_enum_values == ["vllm"], (
         f"BackendType Enum in config.py must contain only ['vllm'], found {backend_enum_values}"

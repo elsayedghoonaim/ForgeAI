@@ -6,7 +6,7 @@ import hashlib
 import hmac
 import secrets
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 
 import jwt
@@ -84,7 +84,7 @@ class AuthManager:
             key_hash=self._hash_key(raw_key),
             role=role,
             name=name,
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=datetime.now(UTC).isoformat(),
         )
         self._api_keys[key_id] = api_key
         return api_key
@@ -113,7 +113,7 @@ class AuthManager:
     def create_token(self, key_id: str, role: Role) -> str:
         """Create a JWT token for authenticated access."""
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         payload = {
             "sub": key_id,
             "role": role.value,

@@ -7,6 +7,7 @@ import os
 import shutil
 import threading
 import time
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -230,7 +231,7 @@ def chat(
     )
     print_runtime_tuning(tuning)
 
-    settings_kwargs: dict[str, object] = {
+    settings_kwargs: dict[str, Any] = {
         "model_name": resolved,
         "tensor_parallel_size": tuning.tensor_parallel_size,
         "gpu_memory_utilization": tuning.gpu_memory_utilization,

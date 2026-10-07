@@ -7,7 +7,7 @@ import json
 import math
 import time
 from contextlib import suppress
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +31,7 @@ router = APIRouter()
 
 
 def _iso_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _get_runtime_adapter(request: Request) -> Any:
@@ -72,9 +72,7 @@ def _is_zero_keep_alive(val: Any) -> bool:
         return False
     if isinstance(val, (int, float)) and val == 0:
         return True
-    if isinstance(val, str) and val.strip().lower() in ("0", "0.0", "0s", "0m", "0h"):
-        return True
-    return False
+    return bool(isinstance(val, str) and val.strip().lower() in ("0", "0.0", "0s", "0m", "0h"))
 
 
 @router.post("/generate")
@@ -406,12 +404,11 @@ async def embed(request: Request, body: OllamaEmbedRequest) -> Response:
             status_code=400,
             content={"error": "Embedding truncate parameter is unsupported."},
         )
-    if body.options is not None:
-        if isinstance(body.options, dict) and len(body.options) > 0:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Embedding options parameter is unsupported."},
-            )
+    if body.options is not None and isinstance(body.options, dict) and len(body.options) > 0:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Embedding options parameter is unsupported."},
+        )
 
     acquire_start = time.perf_counter()
     acquired = False
@@ -478,7 +475,7 @@ async def list_tags(request: Request) -> Response:
 
         try:
             mtime = Path(record.manifest_path).stat().st_mtime
-            modified_at_str = datetime.fromtimestamp(mtime, timezone.utc).isoformat()
+            modified_at_str = datetime.fromtimestamp(mtime, UTC).isoformat()
         except Exception:
             modified_at_str = _iso_now()
 
@@ -511,12 +508,10 @@ async def list_running(request: Request) -> Response:
     statuses = await runtime.engine_manager.list_async()
 
     running_models = []
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for st in statuses:
         ttl = st.remaining_keep_alive_seconds
-        if ttl is None or st.ref_count > 0:
-            expires_at_str = "2100-01-01T00:00:00Z"
-        elif math.isinf(ttl):
+        if ttl is None or st.ref_count > 0 or math.isinf(ttl):
             expires_at_str = "2100-01-01T00:00:00Z"
         else:
             expires_at_str = (now + timedelta(seconds=max(0.0, ttl))).isoformat()
@@ -626,10 +621,8 @@ async def pull_model(request: Request, body: OllamaPullRequest) -> Response:
 
     # Save existing manifest if present to preserve atomic state on registration failure
     existing_manifest = None
-    try:
+    with suppress(Exception):
         existing_manifest = runtime.model_registry.get_manifest(public_tag)
-    except Exception:
-        pass
 
     if body.stream:
         async def _stream_pull():

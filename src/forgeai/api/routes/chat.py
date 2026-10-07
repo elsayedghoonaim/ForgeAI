@@ -61,8 +61,10 @@ async def create_chat_completion(
         model_tag = body.model or "latest"
         try:
             lease, manifest, record, key = await runtime_adapter.acquire_lease(model_tag)
-        except KeyError:
-            raise HTTPException(status_code=404, detail=f"Model '{body.model}' not found")
+        except KeyError as err:
+            raise HTTPException(
+                status_code=404, detail=f"Model '{body.model}' not found"
+            ) from err
 
         acquired = True
         try:

@@ -7,7 +7,8 @@ from __future__ import annotations
 import os
 import platform
 import sys
-from datetime import datetime, timezone
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 import typer
@@ -20,8 +21,10 @@ console = Console()
 app = typer.Typer(invoke_without_command=True)
 
 
-def check_python_version(sys_version_info: tuple[int, ...] = sys.version_info) -> tuple[bool, str]:
+def check_python_version(sys_version_info: Sequence[int] | None = None) -> tuple[bool, str]:
     """Check Python version requirement: >= 3.12, < 3.13 (Python 3.12)."""
+    if sys_version_info is None:
+        sys_version_info = tuple(sys.version_info[:3])
     py_ver = f"{sys_version_info[0]}.{sys_version_info[1]}.{sys_version_info[2]}"
     py_ok = (3, 12) <= (sys_version_info[0], sys_version_info[1]) < (3, 13)
     detail = f"Installed: {py_ver}" if py_ok else f"Installed: {py_ver} → Upgrade to Python 3.12"
@@ -262,7 +265,7 @@ def _print_audit_report(checks: list[tuple[str, bool, str]], score: float) -> No
     """Generate full deployment audit report."""
     report = (
         f"[bold]Deployment Audit Report[/bold]\n"
-        f"Date:     {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
+        f"Date:     {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}\n"
         f"Platform: {platform.system()} {platform.release()}\n"
         f"Python:   {sys.version.split()[0]}\n"
         f"Score:    {score:.0f}/100\n\n"

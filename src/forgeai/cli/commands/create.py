@@ -31,10 +31,7 @@ def _is_ollama_modelfile(content: str) -> bool:
     first_word = lines[0].split()[0].lower() if lines[0].split() else ""
     if first_word in directives:
         return True
-    for line in lines:
-        if line.split()[0].lower() in directives:
-            return True
-    return False
+    return any(line.split()[0].lower() in directives for line in lines)
 
 
 @app.callback(invoke_without_command=True)

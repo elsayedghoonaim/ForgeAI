@@ -1,4 +1,4 @@
-.PHONY: install dev test lint format docker clean help bootstrap-wsl smoke-api
+.PHONY: install dev test test-cov lint format typecheck docker docker-run clean help bootstrap-wsl smoke-api
 
 help: ## Show this help message
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'

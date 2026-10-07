@@ -203,15 +203,15 @@ class DevToolSettings(BaseSettings):
             return values
 
         legacy_fields = {"n_gpu_layers", "n_ctx", "n_batch", "chat_format"}
-        lowered_keys = {str(k).lower(): k for k in values.keys()}
+        lowered_keys = {str(k).lower(): k for k in values}
         detected_legacy = [lowered_keys[k] for k in legacy_fields if k in lowered_keys]
 
         backend_val = values.get("backend")
         backend_str = ""
         if isinstance(backend_val, str):
             backend_str = backend_val.lower().strip()
-        elif hasattr(backend_val, "value"):
-            backend_str = str(backend_val.value).lower().strip()
+        elif (backend_enum_val := getattr(backend_val, "value", None)) is not None:
+            backend_str = str(backend_enum_val).lower().strip()
 
         is_legacy_backend = bool(backend_str) and backend_str != "vllm"
 
@@ -219,8 +219,8 @@ class DevToolSettings(BaseSettings):
         quant_str = ""
         if isinstance(quant_val, str):
             quant_str = quant_val.lower().strip()
-        elif hasattr(quant_val, "value"):
-            quant_str = str(quant_val.value).lower().strip()
+        elif (quant_enum_val := getattr(quant_val, "value", None)) is not None:
+            quant_str = str(quant_enum_val).lower().strip()
 
         is_legacy_quant = quant_str == "gguf"
 

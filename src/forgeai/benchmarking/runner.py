@@ -17,25 +17,24 @@ No subprocess/network/GPU side effects occur on import or during unit tests.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import contextlib
 import importlib.metadata
 import json
 import math
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
 from forgeai.benchmarking.turboquant import (
     PROFILES_CATALOG,
-    STATUS_FAIL,
     STATUS_INCOMPLETE,
-    STATUS_NOT_RUN,
-    STATUS_PASS,
     VLLM_CONTRACT_SPEC,
     VLLM_PINNED_VERSION,
     HardwareMetadata,
@@ -260,7 +259,7 @@ def load_quality_evidence(path: str | Path) -> dict[str, dict[str, Any]]:
         if not isinstance(prof_info, dict):
             continue
 
-        prof_prov = prof_info.get("provenance", {})
+        prof_prov = prof_info.get("provenance") or prof_info
         prof_scale = (
             prof_prov.get("accuracy_scale")
             if isinstance(prof_prov, dict)
@@ -296,12 +295,12 @@ def load_quality_evidence(path: str | Path) -> dict[str, dict[str, Any]]:
             )
 
         dataset_str = (
-            top_provenance.get("dataset")
+            (top_provenance or {}).get("dataset")
             if has_top_prov
             else (prof_prov.get("dataset") if isinstance(prof_prov, dict) else prof_info.get("dataset"))
         )
         evaluator_str = (
-            top_provenance.get("evaluator")
+            (top_provenance or {}).get("evaluator")
             if has_top_prov
             else (prof_prov.get("evaluator") if isinstance(prof_prov, dict) else prof_info.get("evaluator"))
         )
@@ -458,9 +457,8 @@ def process_streaming_response(
                 if text_content is None and isinstance(choice.get("delta"), dict):
                     text_content = choice.get("delta", {}).get("content")
 
-                if text_content is not None and len(str(text_content)) > 0:
-                    if t_first is None:
-                        t_first = ts
+                if text_content is not None and len(str(text_content)) > 0 and t_first is None:
+                    t_first = ts
 
         # Check usage object
         usage = data_obj.get("usage")
@@ -685,9 +683,10 @@ class SequentialBenchmarkRunner:
                     break
 
                 current_vram = self._sample_gpu_vram()
-                if current_vram is not None:
-                    if cold_peak_vram is None or current_vram > cold_peak_vram:
-                        cold_peak_vram = current_vram
+                if current_vram is not None and (
+                    cold_peak_vram is None or current_vram > cold_peak_vram
+                ):
+                    cold_peak_vram = current_vram
 
                 # Check HTTP readiness
                 if self._check_http_readiness(plan.port):
@@ -881,7 +880,7 @@ class SequentialBenchmarkRunner:
         try:
             req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
             with urllib.request.urlopen(req, timeout=5.0) as resp:
-                return resp.status == 200
+                return bool(resp.status == 200)
         except Exception:
             return False
 
@@ -894,9 +893,11 @@ class SequentialBenchmarkRunner:
         if self.http_client_factory:
             client = self.http_client_factory(port)
             if hasattr(client, "run_streaming_benchmark"):
-                return client.run_streaming_benchmark(
+                streamed: tuple[float | None, float | None, float | None, float | None]
+                streamed = client.run_streaming_benchmark(
                     iterations=self.num_iterations, warmup=self.num_warmup
                 )
+                return streamed
 
         import urllib.request
 
@@ -985,10 +986,8 @@ class SequentialBenchmarkRunner:
                 kill_fn()
 
             if wait_fn:
-                try:
+                with contextlib.suppress(Exception):
                     wait_fn(timeout=5.0)
-                except Exception:
-                    pass
         except Exception:
             pass
 

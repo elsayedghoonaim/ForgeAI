@@ -126,13 +126,6 @@ class CacheManager:
         if direct_snap.exists() and direct_snap.is_dir():
             return direct_snap
 
-        # If snapshots dir has subdirectories, check if one matches
-        snapshots_dir = repo_dir / "snapshots"
-        if snapshots_dir.exists() and snapshots_dir.is_dir():
-            snaps = [d for d in snapshots_dir.iterdir() if d.is_dir()]
-            if len(snaps) == 1:
-                return snaps[0]
-
         return None
 
     def download_snapshot(

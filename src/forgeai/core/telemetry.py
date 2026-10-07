@@ -16,7 +16,7 @@ import json
 import os
 import uuid
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -60,7 +60,7 @@ class TelemetryCollector:
         event = {
             "event": event_name,
             "instance_id": self._instance_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "properties": properties or {},
         }
         self._events.append(event)
@@ -71,7 +71,7 @@ class TelemetryCollector:
             return
 
         self._storage_dir.mkdir(parents=True, exist_ok=True)
-        log_file = self._storage_dir / f"events_{datetime.now(timezone.utc).strftime('%Y%m%d')}.jsonl"
+        log_file = self._storage_dir / f"events_{datetime.now(UTC).strftime('%Y%m%d')}.jsonl"
 
         with open(log_file, "a", encoding="utf-8") as f:
             for event in self._events:

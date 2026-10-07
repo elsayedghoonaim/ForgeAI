@@ -19,7 +19,7 @@ from forgeai.cli.main import app
 from forgeai.cli.runtime import DaemonClient, DaemonClientError, resolve_base_url
 from forgeai.models.manifest import ForgeAIManifest
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner(env={"COLUMNS": "200"})
 
 
 class FakeResponse:
@@ -56,8 +56,7 @@ class FakeResponse:
         return self._content.decode("utf-8")
 
     def iter_lines(self) -> Any:
-        for line in self._lines:
-            yield line
+        yield from self._lines
 
 
 class FakeClient:

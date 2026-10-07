@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import math
 import os
+from collections.abc import Generator
 from dataclasses import dataclass
-from typing import Any, Generator, NoReturn
+from typing import Any, NoReturn
 
 import httpx
 import typer
@@ -68,7 +69,7 @@ def resolve_base_url(
     # 2. Determine raw host
     raw_host = host
     if raw_host is None:
-        raw_host = os.getenv("FORGEAI_HOST") or os.getenv("forgeai_host")
+        raw_host = os.getenv("FORGEAI_HOST") or os.getenv("forgeai_host")  # noqa: SIM112 - legacy lowercase alias
 
     # 3. Parse scheme and embedded port from host string if present
     embedded_port: int | None = None
@@ -97,7 +98,7 @@ def resolve_base_url(
     elif embedded_port is not None:
         final_port = embedded_port
     else:
-        env_port = os.getenv("FORGEAI_PORT") or os.getenv("forgeai_port")
+        env_port = os.getenv("FORGEAI_PORT") or os.getenv("forgeai_port")  # noqa: SIM112 - legacy lowercase alias
         if env_port is not None:
             final_port = _parse_and_validate_port(env_port, "environment variable")
         else:
@@ -143,7 +144,8 @@ class DaemonClient:
                     raise DaemonClientError(f"HTTP {response.status_code}: {response.text.strip()}")
 
                 try:
-                    return response.json()
+                    result: dict[str, Any] = response.json()
+                    return result
                 except Exception as err:
                     raise DaemonClientError(f"Malformed JSON response from daemon: {err}") from err
         except DaemonClientError:
@@ -165,30 +167,32 @@ class DaemonClient:
         """Stream NDJSON response line-by-line without buffering the whole response."""
         url = f"{self.base_url}{path if path.startswith('/') else '/' + path}"
         try:
-            with httpx.Client(timeout=self.timeout) as client:
-                with client.stream(method, url, json=json_data, params=params) as response:
-                    if response.status_code >= 400:
-                        body = response.read().decode("utf-8", errors="replace")
-                        try:
-                            err_json = json.loads(body)
-                            if isinstance(err_json, dict) and "error" in err_json:
-                                raise DaemonClientError(str(err_json["error"]))
-                        except (json.JSONDecodeError, TypeError, ValueError):
-                            pass
-                        raise DaemonClientError(f"HTTP {response.status_code}: {body.strip()}")
+            with (
+                httpx.Client(timeout=self.timeout) as client,
+                client.stream(method, url, json=json_data, params=params) as response,
+            ):
+                if response.status_code >= 400:
+                    body = response.read().decode("utf-8", errors="replace")
+                    try:
+                        err_json = json.loads(body)
+                        if isinstance(err_json, dict) and "error" in err_json:
+                            raise DaemonClientError(str(err_json["error"]))
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        pass
+                    raise DaemonClientError(f"HTTP {response.status_code}: {body.strip()}")
 
-                    for line in response.iter_lines():
-                        if not line or not line.strip():
-                            continue
-                        try:
-                            item = json.loads(line)
-                        except Exception as err:
-                            raise DaemonClientError(f"Malformed NDJSON chunk: {err}") from err
+                for line in response.iter_lines():
+                    if not line or not line.strip():
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except Exception as err:
+                        raise DaemonClientError(f"Malformed NDJSON chunk: {err}") from err
 
-                        if isinstance(item, dict) and "error" in item:
-                            raise DaemonClientError(str(item["error"]))
+                    if isinstance(item, dict) and "error" in item:
+                        raise DaemonClientError(str(item["error"]))
 
-                        yield item
+                    yield item
         except DaemonClientError:
             raise
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.NetworkError, httpx.RequestError) as err:

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import Any
 
 from forgeai.core.config import DevToolSettings
 from forgeai.core.engine import EngineKey, EngineLease, EngineManager
@@ -70,7 +71,7 @@ class SharedRuntimeAdapter:
 
         # Snapshot identity combines resolved snapshot path, revision, and manifest digest
         snapshot_identity = hashlib.sha256(
-            f"{snapshot_path}:{manifest.revision}:{record.ref.digest}".encode("utf-8")
+            f"{snapshot_path}:{manifest.revision}:{record.ref.digest}".encode()
         ).hexdigest()
 
         key = EngineKey(

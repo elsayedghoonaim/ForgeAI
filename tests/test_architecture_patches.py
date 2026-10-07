@@ -30,6 +30,7 @@ class DummyBackend(BaseBackend):
         temperature: float = 0.7,
         top_p: float = 0.95,
         stop: list[str] | None = None,
+        top_k: int | None = None,
     ) -> GenerationResult:
         return GenerationResult(text="dummy")
 
@@ -40,6 +41,7 @@ class DummyBackend(BaseBackend):
         temperature: float = 0.7,
         top_p: float = 0.95,
         stop: list[str] | None = None,
+        top_k: int | None = None,
     ):
         yield "dummy"
 
@@ -90,8 +92,8 @@ class ArchitecturePatchesTests(unittest.TestCase):
         ):
             backend.shutdown()
 
-        # Check Ray was shut down
-        mock_ray.shutdown.assert_called_once()
+        # Ray is process-global: a single backend must never shut it down
+        mock_ray.shutdown.assert_not_called()
         # Check PyTorch CUDA cache emptied
         mock_torch.cuda.empty_cache.assert_called_once()
         # Check engine is set to None and is_running is False

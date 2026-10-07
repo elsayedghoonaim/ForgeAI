@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -55,7 +55,7 @@ class AuditLogger:
 
         with self._lock:
             entry: dict[str, Any] = {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
                 "event_type": event_type,
                 "actor": actor,
                 "action": action,
@@ -70,7 +70,7 @@ class AuditLogger:
             entry_hash = entry["hash"]
             self._previous_hash = entry_hash if isinstance(entry_hash, str) else "genesis"
 
-            log_file = self.log_dir / f"audit_{datetime.now(timezone.utc).strftime('%Y%m%d')}.jsonl"
+            log_file = self.log_dir / f"audit_{datetime.now(UTC).strftime('%Y%m%d')}.jsonl"
             with open(log_file, "a", encoding="utf-8") as handle:
                 handle.write(json.dumps(entry) + "\n")
 

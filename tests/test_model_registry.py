@@ -135,16 +135,16 @@ class TestManifestSchemas:
         assert deserialized.model == manifest.model
 
     def test_hf_repo_id_validation_traversal_absolute(self) -> None:
-        with pytest.raises(ValueError, match="Invalid Hugging Face repository ID"):
+        with pytest.raises(ValueError, match="Invalid HuggingFace repository ID format"):
             validate_repo_id_string("../etc/passwd")
 
-        with pytest.raises(ValueError, match="Invalid Hugging Face repository ID"):
+        with pytest.raises(ValueError, match="Invalid HuggingFace repository ID format"):
             validate_repo_id_string("/absolute/path/repo")
 
-        with pytest.raises(ValueError, match="Invalid Hugging Face repository ID"):
+        with pytest.raises(ValueError, match="Invalid HuggingFace repository ID format"):
             validate_repo_id_string("C:\\Windows\\System32")
 
-        with pytest.raises(ValueError, match="Invalid Hugging Face repository ID"):
+        with pytest.raises(ValueError, match="Invalid HuggingFace repository ID format"):
             validate_repo_id_string("owner/repo/extra_component")
 
 

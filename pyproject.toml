@@ -22,7 +22,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "typer>=0.9.0",
+    "typer>=0.9.0,<0.28",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "fastapi>=0.115.0",
@@ -44,11 +44,11 @@ dependencies = [
 # Note: The base development install without vLLM is provided only for management and unit-test workflows.
 # It CANNOT perform model inference and is NOT a CPU fallback.
 dev = [
-    "pytest>=8.0",
-    "pytest-cov>=5.0",
-    "pytest-asyncio>=0.23.0",
-    "ruff>=0.4.0",
-    "mypy>=1.10",
+    "pytest>=8.0,<10",
+    "pytest-cov>=5.0,<8",
+    "pytest-asyncio>=0.23.0,<2",
+    "ruff>=0.16,<0.17",
+    "mypy>=2.4,<2.5",
 ]
 gpu = [
     "vllm==0.22.1",
@@ -83,7 +83,16 @@ cache-dir = "/tmp/forgeai-ruff-cache"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
-ignore = ["E501"]
+ignore = [
+    "E501",
+    # str+Enum -> StrEnum changes str()/format() output; keep the explicit mixin.
+    "UP042",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# typer.Option()/typer.Argument() and fastapi Depends() in defaults is the framework idiom.
+"src/forgeai/cli/**/*.py" = ["B008"]
+"src/forgeai/api/**/*.py" = ["B008"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -99,5 +108,5 @@ disallow_untyped_defs = false
 cache_dir = "/tmp/forgeai-mypy-cache"
 
 [[tool.mypy.overrides]]
-module = ["PIL", "PIL.*", "psutil", "pynvml", "vllm", "yaml"]
+module = ["PIL", "PIL.*", "pynvml", "vllm", "vllm.*", "ray", "torch", "yaml"]
 ignore_missing_imports = true

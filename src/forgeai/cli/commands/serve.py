@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import typer
 
 from forgeai.cli.runtime import handle_cli_error
@@ -81,7 +83,7 @@ def serve(
 
         auth_requested = enable_auth or bootstrap_settings.auth_enabled
 
-        settings_kwargs: dict[str, object] = {
+        settings_kwargs: dict[str, Any] = {
             "host": host,
             "port": port,
             "auth_enabled": auth_requested,

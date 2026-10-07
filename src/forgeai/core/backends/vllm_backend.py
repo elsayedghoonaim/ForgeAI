@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-
 from rich.console import Console
 
 from forgeai.core.backends.base import BaseBackend, GenerationResult
@@ -293,13 +292,13 @@ class VLLMBackend(BaseBackend):
 
         if self._streaming_enabled:
             return await self._generate_vllm_async(
-                prompt, max_tokens or 512, temperature, top_p, stop, top_k
+                prompt, (max_tokens if max_tokens is not None else 512), temperature, top_p, stop, top_k
             )
         else:
             return await asyncio.to_thread(
                 self._generate_vllm,
                 prompt,
-                max_tokens or 512,
+                (max_tokens if max_tokens is not None else 512),
                 temperature,
                 top_p,
                 stop,
@@ -415,7 +414,7 @@ class VLLMBackend(BaseBackend):
         from vllm.sampling_params import RequestOutputKind
 
         kwargs: dict[str, Any] = {
-            "max_tokens": max_tokens or 512,
+            "max_tokens": (max_tokens if max_tokens is not None else 512),
             "temperature": temperature,
             "top_p": top_p,
             "stop": stop,
@@ -473,10 +472,6 @@ class VLLMBackend(BaseBackend):
                     self._engine.shutdown()
             self._engine = None
             self._tokenizer = None
-        with contextlib.suppress(Exception):
-            import ray
-            if ray.is_initialized():
-                ray.shutdown()
         with contextlib.suppress(Exception):
             gc.collect()
         with contextlib.suppress(Exception):

@@ -210,29 +210,34 @@ def select_resource_profile(
             )
 
         # Check CUDA compute capability requirement if applicable
-        if plat_norm == "cuda" and profile.min_cuda_compute_capability is not None:
-            if parsed_cc is None or parsed_cc < profile.min_cuda_compute_capability:
-                min_str = f"{profile.min_cuda_compute_capability[0]}.{profile.min_cuda_compute_capability[1]}"
-                cc_str = f"{parsed_cc[0]}.{parsed_cc[1]}" if parsed_cc else "None"
-                raise ProfileUnavailableError(
-                    f"Profile '{profile.name}' requires NVIDIA CUDA compute capability >= {min_str}, "
-                    f"but detected compute capability is {cc_str}."
-                )
+        if (
+            plat_norm == "cuda"
+            and profile.min_cuda_compute_capability is not None
+            and (parsed_cc is None or parsed_cc < profile.min_cuda_compute_capability)
+        ):
+            min_str = f"{profile.min_cuda_compute_capability[0]}.{profile.min_cuda_compute_capability[1]}"
+            cc_str = f"{parsed_cc[0]}.{parsed_cc[1]}" if parsed_cc else "None"
+            raise ProfileUnavailableError(
+                f"Profile '{profile.name}' requires NVIDIA CUDA compute capability >= {min_str}, "
+                f"but detected compute capability is {cc_str}."
+            )
 
         # Check gating and validation requirements
-        if profile.name == "turboquant_3bit_nc":
-            if not (hw_validation_passed and quality_validation_passed and aggressive_quality_passed):
-                raise ProfileUnavailableError(
-                    "Profile 'turboquant_3bit_nc' is an aggressive POC-only profile and requires "
-                    "hardware validation, quality validation, and aggressive quality gates to be explicitly passed."
-                )
+        if profile.name == "turboquant_3bit_nc" and not (
+            hw_validation_passed and quality_validation_passed and aggressive_quality_passed
+        ):
+            raise ProfileUnavailableError(
+                "Profile 'turboquant_3bit_nc' is an aggressive POC-only profile and requires "
+                "hardware validation, quality validation, and aggressive quality gates to be explicitly passed."
+            )
 
-        if profile.name in ("turboquant_4bit_nc", "turboquant_k8v4"):
-            if not (hw_validation_passed and quality_validation_passed):
-                raise ProfileUnavailableError(
-                    f"Profile '{profile.name}' requires both hardware and quality validation flags "
-                    "to be explicitly recorded passed before it can be selected."
-                )
+        if profile.name in ("turboquant_4bit_nc", "turboquant_k8v4") and not (
+            hw_validation_passed and quality_validation_passed
+        ):
+            raise ProfileUnavailableError(
+                f"Profile '{profile.name}' requires both hardware and quality validation flags "
+                "to be explicitly recorded passed before it can be selected."
+            )
 
         return profile
 

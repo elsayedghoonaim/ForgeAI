@@ -170,7 +170,7 @@ def _scan_pickle_bytes(data: Any, file_name: str) -> list[str]:
     try:
         for opcode, arg, _pos in pickletools.genops(data):
             if opcode.name in ("SHORT_BINUNICODE", "BINUNICODE", "UNICODE", "STRING"):
-                stack.append(arg)
+                stack.append(arg if isinstance(arg, str) else "")
             elif opcode.name in ("BINBYTES", "SHORT_BINBYTES"):
                 if isinstance(arg, bytes):
                     try:
