@@ -10,10 +10,12 @@ Never claims hardware validation ran without verified empirical measurements.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+import copy
+import dataclasses
 import json
 import math
+from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 # Contract Pinning
@@ -119,6 +121,18 @@ PROFILES_CATALOG: dict[str, BenchmarkProfileSpec] = {
     ),
 }
 
+DEFAULT_MIN_SOAK_SECONDS: float = 1800.0
+LEAK_MIN_RESIDUAL_MB: float = 100.0
+LEAK_VRAM_FRACTION: float = 0.02
+
+
+def max_allowed_unload_vram_mb(total_vram_mb: float) -> float:
+    """Residual VRAM allowed after unload: max(100 MiB, 2% of total VRAM)."""
+    if total_vram_mb > 0:
+        return max(LEAK_MIN_RESIDUAL_MB, LEAK_VRAM_FRACTION * total_vram_mb)
+    return LEAK_MIN_RESIDUAL_MB
+
+
 PRIMARY_BENCHMARK_PROFILES: tuple[str, ...] = ("auto", "fp8", "turboquant_4bit_nc", "turboquant_3bit_nc")
 
 
@@ -144,6 +158,23 @@ class HardwareMetadata:
             driver_version=data.get("driver_version"),
             platform=data.get("platform", "cuda"),
         )
+
+
+def _coerce_number(name: str, value: Any, *, integer: bool) -> float | int:
+    """Coerce a measurement to a finite float/int; reject bools, non-numeric and non-finite."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ValueError(f"Measurement '{name}' must be numeric, got {value!r}.")
+    try:
+        num = float(value)
+    except ValueError as err:
+        raise ValueError(f"Measurement '{name}' must be numeric, got {value!r}.") from err
+    if not math.isfinite(num):
+        raise ValueError(f"Measurement '{name}' must be finite, got {value!r}.")
+    if integer:
+        if num != int(num):
+            raise ValueError(f"Measurement '{name}' must be an integer, got {value!r}.")
+        return int(num)
+    return num
 
 
 @dataclass
@@ -184,34 +215,23 @@ class ProfileMeasurements:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ProfileMeasurements:
-        return cls(
-            idle_process_rss_mb=data.get("idle_process_rss_mb"),
-            idle_gpu_memory_mb=data.get("idle_gpu_memory_mb"),
-            model_load_duration_seconds=data.get("model_load_duration_seconds"),
-            cold_load_peak_vram_mb=data.get("cold_load_peak_vram_mb"),
-            cold_load_steady_vram_mb=data.get("cold_load_steady_vram_mb"),
-            kv_cache_capacity_tokens=data.get("kv_cache_capacity_tokens"),
-            ttft_p50_ms=data.get("ttft_p50_ms"),
-            ttft_p95_ms=data.get("ttft_p95_ms"),
-            decode_tokens_per_sec=data.get("decode_tokens_per_sec"),
-            prompt_throughput_tokens_per_sec=data.get("prompt_throughput_tokens_per_sec"),
-            perplexity=data.get("perplexity"),
-            task_accuracy=data.get("task_accuracy"),
-            long_context_accuracy=data.get("long_context_accuracy"),
-            crashes_count=data.get("crashes_count"),
-            nans_count=data.get("nans_count"),
-            has_memory_leak=data.get("has_memory_leak"),
-            post_unload_residual_vram_mb=data.get("post_unload_residual_vram_mb"),
-            soak_duration_seconds=data.get("soak_duration_seconds"),
-            evidence_sources=dict(data.get("evidence_sources", {})),
-            quality_provenance=data.get("quality_provenance"),
-            capacity_ratio_vs_bf16=data.get("capacity_ratio_vs_bf16"),
-            ttft_p95_ratio_vs_bf16=data.get("ttft_p95_ratio_vs_bf16"),
-            decode_throughput_ratio_vs_bf16=data.get("decode_throughput_ratio_vs_bf16"),
-            relative_perplexity_degradation_pct=data.get("relative_perplexity_degradation_pct"),
-            task_accuracy_drop_pp=data.get("task_accuracy_drop_pp"),
-            long_context_accuracy_drop_pp=data.get("long_context_accuracy_drop_pp"),
-        )
+        """Build from a dict, validating numeric/bool field types (unknown keys are ignored)."""
+        kwargs: dict[str, Any] = {}
+        for f in dataclasses.fields(cls):
+            if f.name not in data:
+                continue
+            value = data[f.name]
+            ftype = str(f.type)
+            if f.name == "evidence_sources":
+                value = dict(value or {})
+            elif value is not None and ftype.startswith("float"):
+                value = _coerce_number(f.name, value, integer=False)
+            elif value is not None and ftype.startswith("int"):
+                value = _coerce_number(f.name, value, integer=True)
+            elif value is not None and ftype.startswith("bool") and not isinstance(value, bool):
+                raise ValueError(f"Measurement '{f.name}' must be a boolean, got {value!r}.")
+            kwargs[f.name] = value
+        return cls(**kwargs)
 
 
 @dataclass
@@ -325,7 +345,7 @@ class TurboQuantBenchmarkArtifact:
     """
 
     schema_version: str = SCHEMA_VERSION
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     model: str = "Qwen/Qwen3-0.6B"
     vllm_version: str = VLLM_CONTRACT_SPEC
     hardware_validation_performed: bool = False
@@ -367,7 +387,7 @@ class TurboQuantBenchmarkArtifact:
 
         return cls(
             schema_version=data.get("schema_version", SCHEMA_VERSION),
-            timestamp=data.get("timestamp", datetime.now(timezone.utc).isoformat()),
+            timestamp=data.get("timestamp", datetime.now(UTC).isoformat()),
             model=data.get("model", "Qwen/Qwen3-0.6B"),
             vllm_version=data.get("vllm_version", VLLM_CONTRACT_SPEC),
             hardware_validation_performed=bool(data.get("hardware_validation_performed", False)),
@@ -481,31 +501,44 @@ def _check_missing_fields(
             reasons.append(f"Missing required measurement: {field_name}")
             continue
 
-        if isinstance(val, (int, float)):
-            if math.isnan(val) or math.isinf(val):
-                missing_metrics.append(field_name)
-                reasons.append(f"Non-finite measurement value ({val}) for: {field_name}")
-                continue
+        if isinstance(val, (int, float)) and (math.isnan(val) or math.isinf(val)):
+            missing_metrics.append(field_name)
+            reasons.append(f"Non-finite measurement value ({val}) for: {field_name}")
+            continue
 
-        if field_name == "perplexity":
-            if isinstance(val, (int, float)) and val <= 0.0:
-                missing_metrics.append(field_name)
-                reasons.append(f"Invalid non-positive perplexity ({val}) for: perplexity")
-        elif field_name in ("task_accuracy", "long_context_accuracy"):
-            if isinstance(val, (int, float)) and not (0.0 <= val <= 100.0):
-                missing_metrics.append(field_name)
-                reasons.append(f"Accuracy out of valid range [0, 100] ({val}) for: {field_name}")
+        if field_name == "perplexity" and isinstance(val, (int, float)) and val <= 0.0:
+            missing_metrics.append(field_name)
+            reasons.append(f"Invalid non-positive perplexity ({val}) for: perplexity")
+        elif (
+            field_name in ("task_accuracy", "long_context_accuracy")
+            and isinstance(val, (int, float))
+            and not (0.0 <= val <= 100.0)
+        ):
+            missing_metrics.append(field_name)
+            reasons.append(f"Accuracy out of valid range [0, 100] ({val}) for: {field_name}")
 
     return missing_metrics, reasons
 
 
-def _compute_accuracy_drop(ref_acc: float, exp_acc: float) -> float:
+def _compute_accuracy_drop(ref_acc: float | None, exp_acc: float | None) -> float:
     """Compute accuracy drop in percentage points for normalized percentage values (0..100)."""
+    if ref_acc is None or exp_acc is None:
+        return 0.0
     return ref_acc - exp_acc
+
+
+def _safe_ratio(numerator: float | None, denominator: float | None, default: float) -> float:
+    """Return numerator / denominator, or ``default`` when either side is missing or the
+    denominator is not strictly positive."""
+    if numerator is None or denominator is None or denominator <= 0:
+        return default
+    return numerator / denominator
 
 
 def evaluate_artifact(
     artifact: TurboQuantBenchmarkArtifact | dict[str, Any] | str,
+    *,
+    min_soak_seconds: float = DEFAULT_MIN_SOAK_SECONDS,
 ) -> TurboQuantBenchmarkArtifact:
     """
     Pure deterministic go/no-go evaluator relative to BF16 baseline.
@@ -527,6 +560,8 @@ def evaluate_artifact(
            task and long-context drop <= 2.0 pp; same stability/reclamation gate.
            TQ3 is marked aggressive and POC-only (never production-enabled).
 
+    The stability soak must last at least ``min_soak_seconds`` (the configured soak duration).
+
     Missing evidence or wrong contract identity must never pass.
     For unvalidated plan templates (hardware_validation_performed=False), absent hardware evidence
     yields contract status 'incomplete' and overall status 'not_run', not 'fail'.
@@ -539,12 +574,12 @@ def evaluate_artifact(
         artifact_obj = artifact
 
     # Make deep copy / clean instance for evaluation
-    eval_art = TurboQuantBenchmarkArtifact.from_dict(artifact_obj.to_dict())
+    eval_art = copy.deepcopy(artifact_obj)
 
     gate_outcomes: dict[str, GateOutcome] = {}
     profile_results = eval_art.profile_results
     total_vram_mb = eval_art.hardware.total_vram_mb if eval_art.hardware else 0.0
-    max_allowed_unload_vram = max(100.0, 0.02 * total_vram_mb) if total_vram_mb > 0 else 100.0
+    max_allowed_unload_vram = max_allowed_unload_vram_mb(total_vram_mb)
 
     # ---------------------------------------------------------
     # CONTRACT IDENTITY GATE (Evaluated first before any pass)
@@ -651,7 +686,7 @@ def evaluate_artifact(
     )
 
     # Standard required measurement fields for complete evaluation
-    REQUIRED_MEASUREMENT_FIELDS = [
+    required_measurement_fields = [
         "idle_process_rss_mb",
         "idle_gpu_memory_mb",
         "model_load_duration_seconds",
@@ -685,15 +720,15 @@ def evaluate_artifact(
         gate_outcomes["auto"] = GateOutcome(
             gate_name="auto_baseline",
             passed=False,
-            status=STATUS_NOT_RUN if not auto_prof else STATUS_INCOMPLETE,
+            status=STATUS_NOT_RUN,
             failed_metrics=["auto_measurements"],
             reasons=["Missing BF16 baseline evidence."],
             details={},
         )
         if auto_prof:
-            auto_prof.status = STATUS_INCOMPLETE
+            auto_prof.status = STATUS_NOT_RUN
     else:
-        missing_auto, missing_auto_reasons = _check_missing_fields(auto_meas, REQUIRED_MEASUREMENT_FIELDS)
+        missing_auto, missing_auto_reasons = _check_missing_fields(auto_meas, required_measurement_fields)
         if missing_auto:
             gate_outcomes["auto"] = GateOutcome(
                 gate_name="auto_baseline",
@@ -716,13 +751,16 @@ def evaluate_artifact(
                     f"nans={auto_meas.nans_count}, leak={auto_meas.has_memory_leak}"
                 )
 
-            if auto_meas.soak_duration_seconds is None or auto_meas.soak_duration_seconds < 1800.0:
+            if auto_meas.soak_duration_seconds is None or auto_meas.soak_duration_seconds < min_soak_seconds:
                 auto_failed_metrics.append("soak_duration_seconds")
                 auto_reasons.append(
-                    f"BF16 baseline stability soak duration ({auto_meas.soak_duration_seconds}s) is below required minimum 1800.0s."
+                    f"BF16 baseline stability soak duration ({auto_meas.soak_duration_seconds}s) is below required minimum {min_soak_seconds}s."
                 )
 
-            if auto_meas.post_unload_residual_vram_mb > max_allowed_unload_vram:
+            if (
+                auto_meas.post_unload_residual_vram_mb is not None
+                and auto_meas.post_unload_residual_vram_mb > max_allowed_unload_vram
+            ):
                 auto_failed_metrics.append("post_unload_residual_vram")
                 auto_reasons.append(
                     f"BF16 baseline unload residual {auto_meas.post_unload_residual_vram_mb:.1f} MiB "
@@ -785,7 +823,7 @@ def evaluate_artifact(
             prof.status = STATUS_NOT_RUN
             return
 
-        missing_fields, missing_reasons = _check_missing_fields(meas, REQUIRED_MEASUREMENT_FIELDS)
+        missing_fields, missing_reasons = _check_missing_fields(meas, required_measurement_fields)
         if missing_fields:
             gate_outcomes[gate_key] = GateOutcome(
                 gate_name=gate_key,
@@ -809,24 +847,14 @@ def evaluate_artifact(
             return
 
         # Compute derived metrics vs BF16
-        cap_ratio = (
-            meas.kv_cache_capacity_tokens / auto_meas.kv_cache_capacity_tokens
-            if auto_meas.kv_cache_capacity_tokens and auto_meas.kv_cache_capacity_tokens > 0
-            else 0.0
-        )
-        ttft_ratio = (
-            meas.ttft_p95_ms / auto_meas.ttft_p95_ms
-            if auto_meas.ttft_p95_ms and auto_meas.ttft_p95_ms > 0
-            else 999.0
-        )
-        decode_ratio = (
-            meas.decode_tokens_per_sec / auto_meas.decode_tokens_per_sec
-            if auto_meas.decode_tokens_per_sec and auto_meas.decode_tokens_per_sec > 0
-            else 0.0
-        )
+        cap_ratio = _safe_ratio(meas.kv_cache_capacity_tokens, auto_meas.kv_cache_capacity_tokens, 0.0)
+        ttft_ratio = _safe_ratio(meas.ttft_p95_ms, auto_meas.ttft_p95_ms, 999.0)
+        decode_ratio = _safe_ratio(meas.decode_tokens_per_sec, auto_meas.decode_tokens_per_sec, 0.0)
         rel_ppl_deg = (
             ((meas.perplexity - auto_meas.perplexity) / auto_meas.perplexity) * 100.0
-            if auto_meas.perplexity and auto_meas.perplexity > 0
+            if meas.perplexity is not None
+            and auto_meas.perplexity is not None
+            and auto_meas.perplexity > 0
             else 999.0
         )
         task_drop_pp = _compute_accuracy_drop(auto_meas.task_accuracy, meas.task_accuracy)
@@ -888,21 +916,24 @@ def evaluate_artifact(
                 f"Long-context accuracy drop {lc_drop_pp:.2f} percentage points exceeds maximum allowed threshold {max_acc_drop_pp:.2f} percentage point"
             )
 
-        # Gate 7: Stability soak (zero crashes, zero NaNs, zero memory leak, soak >= 1800s)
+        # Gate 7: Stability soak (zero crashes, zero NaNs, zero memory leak, soak >= min_soak_seconds)
         if meas.crashes_count != 0 or meas.nans_count != 0 or meas.has_memory_leak:
             failed_metrics.append("stability")
             reasons.append(
                 f"Stability gate failed: crashes_count={meas.crashes_count}, "
                 f"nans_count={meas.nans_count}, has_memory_leak={meas.has_memory_leak}"
             )
-        if meas.soak_duration_seconds is None or meas.soak_duration_seconds < 1800.0:
+        if meas.soak_duration_seconds is None or meas.soak_duration_seconds < min_soak_seconds:
             failed_metrics.append("soak_duration_seconds")
             reasons.append(
-                f"Stability soak duration {meas.soak_duration_seconds}s is below required minimum 1800.0s."
+                f"Stability soak duration {meas.soak_duration_seconds}s is below required minimum {min_soak_seconds}s."
             )
 
         # Gate 8: VRAM reclamation
-        if meas.post_unload_residual_vram_mb > max_allowed_unload_vram:
+        if (
+            meas.post_unload_residual_vram_mb is not None
+            and meas.post_unload_residual_vram_mb > max_allowed_unload_vram
+        ):
             failed_metrics.append("post_unload_residual_vram")
             reasons.append(
                 f"Post-unload residual VRAM {meas.post_unload_residual_vram_mb:.1f} MiB "
@@ -959,7 +990,7 @@ def evaluate_artifact(
     fp8_prof = profile_results.get("fp8")
     if fp8_prof and fp8_prof.measurements:
         fp8_meas = fp8_prof.measurements
-        missing_fp8, missing_fp8_reasons = _check_missing_fields(fp8_meas, REQUIRED_MEASUREMENT_FIELDS)
+        missing_fp8, missing_fp8_reasons = _check_missing_fields(fp8_meas, required_measurement_fields)
         if missing_fp8:
             gate_outcomes["fp8"] = GateOutcome(
                 gate_name="fp8_baseline",
@@ -970,10 +1001,16 @@ def evaluate_artifact(
             )
             fp8_prof.status = STATUS_INCOMPLETE
         elif auto_valid and auto_meas:
-            fp8_cap = fp8_meas.kv_cache_capacity_tokens / auto_meas.kv_cache_capacity_tokens
-            fp8_ttft = fp8_meas.ttft_p95_ms / auto_meas.ttft_p95_ms
-            fp8_decode = fp8_meas.decode_tokens_per_sec / auto_meas.decode_tokens_per_sec
-            fp8_ppl = ((fp8_meas.perplexity - auto_meas.perplexity) / auto_meas.perplexity) * 100.0
+            fp8_cap = _safe_ratio(fp8_meas.kv_cache_capacity_tokens, auto_meas.kv_cache_capacity_tokens, 0.0)
+            fp8_ttft = _safe_ratio(fp8_meas.ttft_p95_ms, auto_meas.ttft_p95_ms, 999.0)
+            fp8_decode = _safe_ratio(fp8_meas.decode_tokens_per_sec, auto_meas.decode_tokens_per_sec, 0.0)
+            fp8_ppl = (
+                ((fp8_meas.perplexity - auto_meas.perplexity) / auto_meas.perplexity) * 100.0
+                if fp8_meas.perplexity is not None
+                and auto_meas.perplexity is not None
+                and auto_meas.perplexity > 0
+                else 999.0
+            )
 
             fp8_meas.capacity_ratio_vs_bf16 = round(fp8_cap, 4)
             fp8_meas.ttft_p95_ratio_vs_bf16 = round(fp8_ttft, 4)
@@ -1018,5 +1055,16 @@ def evaluate_artifact(
             eval_art.status = STATUS_FAIL
         else:
             eval_art.status = STATUS_INCOMPLETE
+
+    # An untouched plan template (no measurements, no hardware validation) is not an
+    # attempted/partial run: the contract evidence is incomplete, but the overall
+    # artifact stays `not_run` as documented by the public contract.
+    untouched = not profile_results or all(p.measurements is None for p in profile_results.values())
+    if (
+        not eval_art.hardware_validation_performed
+        and untouched
+        and eval_art.status == STATUS_INCOMPLETE
+    ):
+        eval_art.status = STATUS_NOT_RUN
 
     return eval_art

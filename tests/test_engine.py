@@ -8,8 +8,6 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
 from forgeai.core.backends.vllm_backend import VLLMBackend
 from forgeai.core.config import DevToolSettings
 from forgeai.utils.gpu import GPUInfo, GPUTopology
@@ -238,7 +236,7 @@ class ChatStartupStatusTests(unittest.TestCase):
 
         self.assertIn("Loading model and preparing the engine", initial)
         self.assertIn("compiling kernels", compiling)
-        self.assertIn("--startup-logs", stalled)
+        self.assertIn("daemon's logs", stalled)
 
 
 if __name__ == "__main__":

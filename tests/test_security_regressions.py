@@ -29,9 +29,11 @@ class SecurityRegressionTests(unittest.TestCase):
                 forgeai_home=root / "forgeai",
                 hf_home=root / "hf",
             )
-            with patch.object(manager, "get_snapshot_path", return_value=snapshot):
-                with self.assertRaisesRegex(ValueError, "Pickle-backed model weights"):
-                    manager.download_snapshot_secure("org/model", enable_safety_scan=False)
+            with (
+                patch.object(manager, "get_snapshot_path", return_value=snapshot),
+                self.assertRaisesRegex(ValueError, "Pickle-backed model weights"),
+            ):
+                manager.download_snapshot_secure("org/model", enable_safety_scan=False)
 
             self.assertFalse(snapshot.exists())
 
@@ -46,9 +48,11 @@ class SecurityRegressionTests(unittest.TestCase):
                 forgeai_home=root / "forgeai",
                 hf_home=root / "hf",
             )
-            with patch.object(manager, "get_snapshot_path", return_value=snapshot):
-                with self.assertRaisesRegex(ValueError, "no .safetensors"):
-                    manager.download_snapshot_secure("org/model", enable_safety_scan=False)
+            with (
+                patch.object(manager, "get_snapshot_path", return_value=snapshot),
+                self.assertRaisesRegex(ValueError, "no .safetensors"),
+            ):
+                manager.download_snapshot_secure("org/model", enable_safety_scan=False)
 
             self.assertFalse(snapshot.exists())
 

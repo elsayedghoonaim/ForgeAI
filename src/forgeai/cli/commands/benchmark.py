@@ -11,7 +11,6 @@ from pathlib import Path
 import typer
 from rich.console import Console
 from rich.markup import escape
-from rich.table import Table
 
 console = Console()
 app = typer.Typer(invoke_without_command=True)
@@ -115,16 +114,13 @@ def benchmark(
     ),
 ) -> None:
     """TurboQuant performance benchmarking and compute evaluation harness."""
+    from rich.table import Table
+
+    from forgeai.cli.runtime import exit_if_gguf
     from forgeai.core.telemetry import track_event
 
     resolved = model
-    if resolved.lower().endswith(".gguf") or ".gguf" in resolved.lower():
-        console.print(
-            f"[red]ERROR:[/red] GGUF model format is unsupported in ForgeAI v2.0+ (model: {resolved!r}). "
-            "llama.cpp has been removed in favor of vLLM. "
-            "Remediation: Specify a Hugging Face repo ID or local safetensors directory."
-        )
-        raise typer.Exit(code=1)
+    exit_if_gguf(resolved)
 
     mode_clean = mode.lower().strip()
     valid_modes = ("plan", "evaluate", "execute")
@@ -217,7 +213,7 @@ def benchmark(
             console.print(f"[red]ERROR:[/red] Reading JSON artifact from '{in_p}' failed: {e}")
             raise typer.Exit(code=1) from e
 
-        evaluated = evaluate_artifact(artifact)
+        evaluated = evaluate_artifact(artifact, min_soak_seconds=soak_duration)
         json_str = evaluated.to_json(indent=2)
 
         if output_path:

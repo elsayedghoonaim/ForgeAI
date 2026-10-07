@@ -5,10 +5,9 @@ forgeai show — Display manifest and model details.
 from __future__ import annotations
 
 import json
+
 import typer
 from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
 
 from forgeai.cli.runtime import DaemonClient, DaemonClientError, handle_cli_error
 
@@ -23,6 +22,8 @@ def show(
     host: str | None = typer.Option(None, "--host", help="Daemon host"),
     port: int | None = typer.Option(None, "--port", help="Daemon port"),
 ) -> None:
+    from rich.panel import Panel
+    from rich.table import Table
     try:
         client = DaemonClient(host=host, port=port)
         data = client.request("POST", "/api/show", json_data={"name": model})

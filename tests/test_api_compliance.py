@@ -1,18 +1,13 @@
 from __future__ import annotations
 
 import json
-import sys
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 
-# Ensure the src folder is on Python path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
 from forgeai.api.server import create_app
-from forgeai.core.backends.factory import create_backend, resolve_backend
+from forgeai.core.backends.factory import create_backend
 from forgeai.core.config import BackendType, DevToolSettings, QuantizationType
 
 
@@ -44,13 +39,6 @@ class ApiComplianceTests(unittest.IsolatedAsyncioTestCase):
         transport = httpx.ASGITransport(app=app)
         return httpx.AsyncClient(transport=transport, base_url="http://testserver")
 
-    def test_backend_vllm_only_contract(self) -> None:
-        """Verify that resolve_backend unambiguously returns VLLM and never llama.cpp."""
-        settings = DevToolSettings(model_name="meta-llama/Llama-3-8B-Instruct")
-        backend_type = resolve_backend(settings)
-        self.assertEqual(backend_type, BackendType.VLLM)
-        self.assertEqual(backend_type.value, "vllm")
-
     def test_gguf_model_path_rejection(self) -> None:
         """Verify that .gguf model paths/references are explicitly rejected with clear error text."""
         # 1. DevToolSettings construction rejection
@@ -61,10 +49,6 @@ class ApiComplianceTests(unittest.IsolatedAsyncioTestCase):
 
         # 2. Factory boundary rejection using validation-bypass object
         bypassed_settings = DevToolSettings.model_construct(model_name="model.gguf")
-        with self.assertRaises(ValueError) as ctx_resolve:
-            resolve_backend(bypassed_settings)
-        self.assertIn("GGUF model format is unsupported in ForgeAI v2.0+", str(ctx_resolve.exception))
-
         with self.assertRaises(ValueError) as ctx_create:
             create_backend(bypassed_settings)
         self.assertIn("GGUF model format is unsupported in ForgeAI v2.0+", str(ctx_create.exception))
@@ -126,6 +110,7 @@ class ApiComplianceTests(unittest.IsolatedAsyncioTestCase):
             data_json = json.loads(first_chunk[6:])
             self.assertEqual(data_json["object"], "chat.completion.chunk")
             self.assertEqual(data_json["choices"][0]["delta"]["content"], "hello")
+            self.assertEqual(data_json["choices"][0]["delta"]["role"], "assistant")
 
             second_chunk = lines[1]
             self.assertTrue(second_chunk.startswith("data: "))

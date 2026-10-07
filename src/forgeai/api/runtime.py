@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from pathlib import Path
+from typing import Any
 
 from forgeai.core.config import DevToolSettings
 from forgeai.core.engine import EngineKey, EngineLease, EngineManager
@@ -33,6 +36,7 @@ class SharedRuntimeAdapter:
         # API/runtime model acquisition must never use the raw cache primitive.
         # Preserve explicit test/double implementations, while upgrading real
         # CacheManager instances to the fail-closed secure variant.
+        self.cache_manager: CacheManager
         if cache_manager is None:
             self.cache_manager = SecureCacheManager()
         elif type(cache_manager) is CacheManager:
@@ -44,6 +48,10 @@ class SharedRuntimeAdapter:
             self.cache_manager = cache_manager
 
         self._key_to_tag: dict[EngineKey, str] = {}
+        # Keep the key->tag map bounded: drop entries when the engine is unloaded.
+        add_listener = getattr(self.engine_manager, "add_unload_listener", None)
+        if add_listener is not None:
+            add_listener(lambda key: self._key_to_tag.pop(key, None))
 
     def resolve_tag(self, tag: str | None) -> str:
         """Resolve requested model tag to full tag format (name:tag_version)."""
@@ -53,23 +61,38 @@ class SharedRuntimeAdapter:
         return f"{name}:{version}"
 
     def get_manifest_and_record(self, tag: str) -> tuple[ForgeAIManifest, ModelRecord]:
-        """Resolve tag to manifest and ModelRecord. Raises KeyError if not found."""
+        """Resolve tag to manifest and ModelRecord. Raises KeyError if not found.
+
+        The record carries the (cached) parsed manifest, so the manifest file is not re-read.
+        """
         resolved_tag = self.resolve_tag(tag)
         try:
             record = self.model_registry.get_record(resolved_tag, cache_manager=self.cache_manager)
-            manifest = self.model_registry.get_manifest(resolved_tag)
-            return manifest, record
         except KeyError:
             if ":" not in tag:
-                record = self.model_registry.get_record(f"{tag}:latest", cache_manager=self.cache_manager)
-                manifest = self.model_registry.get_manifest(f"{tag}:latest")
-                return manifest, record
-            raise
+                record = self.model_registry.get_record(
+                    f"{tag}:latest", cache_manager=self.cache_manager
+                )
+            else:
+                raise
+        manifest = record.manifest
+        if manifest is None:  # registries that predate record.manifest
+            manifest = self.model_registry.get_manifest(record.ref.full_tag)
+        return manifest, record
 
     def build_engine_key(self, manifest: ForgeAIManifest, record: ModelRecord) -> EngineKey:
         """Construct deterministic EngineKey from manifest and record."""
-        snapshot_path = record.snapshot_path
-        repo_id = snapshot_path if snapshot_path and record.size_bytes > 0 else manifest.model
+        # The key must not depend on download state (the snapshot path/size changes once the
+        # model is pulled), otherwise the same model would be loaded twice. Identity comes
+        # from the model id, revision and manifest digest only.
+        # For local_dir manifests ``model`` is the directory, which the engine loads from
+        # directly (EngineKey.to_settings sets model_path when the path exists). For
+        # huggingface manifests it is the repo id and ``revision`` pins the snapshot.
+        repo_id = (
+            str(Path(manifest.model).expanduser().resolve())
+            if getattr(manifest, "source_kind", "huggingface") == "local_dir"
+            else manifest.model
+        )
 
         chat_template_digest = (
             hashlib.sha256(manifest.chat_template.encode("utf-8")).hexdigest()
@@ -78,7 +101,7 @@ class SharedRuntimeAdapter:
         )
 
         snapshot_identity = hashlib.sha256(
-            f"{snapshot_path}:{manifest.revision}:{record.ref.digest}".encode("utf-8")
+            f"{manifest.model}:{manifest.revision}:{record.ref.digest}".encode()
         ).hexdigest()
 
         key = EngineKey(
@@ -101,7 +124,6 @@ class SharedRuntimeAdapter:
             device_runtime_id="cuda:0",
         )
 
-        self._key_to_tag[key] = record.ref.full_tag
         return key
 
     def get_engine_key_for_tag(
@@ -120,8 +142,9 @@ class SharedRuntimeAdapter:
         self, tag: str, keep_alive: Any = None
     ) -> tuple[EngineLease, ForgeAIManifest, ModelRecord, EngineKey]:
         """Pre-acquire an engine lease before returning HTTP responses."""
-        key, manifest, record = self.get_engine_key_for_tag(tag)
+        key, manifest, record = await asyncio.to_thread(self.get_engine_key_for_tag, tag)
         lease = await self.engine_manager.acquire(key, keep_alive=keep_alive)
+        self._key_to_tag[key] = record.ref.full_tag
         return lease, manifest, record, key
 
     async def release_lease(self, key: EngineKey, keep_alive: Any = None) -> None:

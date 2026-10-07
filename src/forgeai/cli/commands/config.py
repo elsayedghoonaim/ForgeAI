@@ -11,7 +11,6 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
-from rich.table import Table
 
 console = Console()
 app = typer.Typer()
@@ -82,6 +81,7 @@ def get_value(
 @app.command("list")
 def list_config() -> None:
     """Show all configuration values."""
+    from rich.table import Table
     config = _load_config()
     if not config:
         console.print("[dim]No configuration set yet.[/dim]")

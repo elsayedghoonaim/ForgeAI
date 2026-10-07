@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-import sys
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from forgeai.api.server import create_app
 
@@ -81,6 +77,8 @@ class FakeRateLimiter:
 
     def check(self, key: str):
         self.keys.append(key)
+        if key.startswith("ip:"):
+            return True, 0
         return self.allow, self.retry_after
 
 
@@ -218,7 +216,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 429)
         self.assertEqual(response.headers["Retry-After"], "7")
-        self.assertEqual(rate_limiter.keys[0].split(":")[1], "inference")
+        self.assertEqual(rate_limiter.keys[0].split(":")[0], "ip")
+        self.assertEqual(rate_limiter.keys[1].split(":")[1], "inference")
 
     async def test_audit_logger_records_successful_access(self) -> None:
         audit_logger = FakeAuditLogger()

@@ -2,22 +2,31 @@
 
 from __future__ import annotations
 
-from ipaddress import ip_address
+import ipaddress
+from typing import Any
 
 import typer
 
 from forgeai.cli.runtime import handle_cli_error
 
 
-def _is_loopback_host(host: str) -> bool:
-    """Return True only for loopback bind addresses/names."""
-    normalized = host.strip().lower().strip("[]")
-    if normalized == "localhost":
+def is_loopback_host(host: str) -> bool:
+    """Return True if ``host`` only binds to the loopback interface."""
+
+    value = host.strip().strip("[]").lower()
+    if value == "localhost":
         return True
     try:
-        return ip_address(normalized).is_loopback
+        addr = ipaddress.ip_address(value)
     except ValueError:
         return False
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    return addr.is_loopback
+
+
+# Backwards-compatible private alias (used by the security regression tests).
+_is_loopback_host = is_loopback_host
 
 
 def serve(
@@ -25,6 +34,12 @@ def serve(
     port: int = typer.Option(11434, "--port", help="Server port"),
     workers: int = typer.Option(1, "--workers", help="Number of UV workers"),
     enable_auth: bool = typer.Option(False, "--auth", help="Enable API authentication"),
+    insecure_no_auth: bool = typer.Option(
+        False,
+        "--insecure-no-auth",
+        envvar="FORGEAI_INSECURE_NO_AUTH",
+        help="Allow serving on a non-loopback host with authentication disabled (UNSAFE)",
+    ),
     log_level: str = typer.Option("info", "--log-level", help="Log level"),
     keep_alive: str = typer.Option("5m", "--keep-alive", help="Default engine keep_alive TTL"),
     max_loaded_models: int = typer.Option(1, "--max-loaded-models", help="Max loaded engines in VRAM"),
@@ -82,7 +97,7 @@ def serve(
     from forgeai.models.loader import CacheManager
     from forgeai.models.registry import ModelRegistry
     from forgeai.monitoring.logging import setup_logging
-    from forgeai.security.auth import AuthManager, Role
+    from forgeai.security.auth import AuthManager, Role, validate_auth_secret
     from forgeai.security.compliance.audit_logger import AuditLogger
     from forgeai.security.rate_limit import MemoryRateLimiter
 
@@ -93,14 +108,20 @@ def serve(
         setup_logging(level=log_level, json_output=bootstrap_settings.log_json)
 
         auth_requested = enable_auth or bootstrap_settings.auth_enabled
-        if not auth_requested and not _is_loopback_host(host):
-            handle_cli_error(
-                "Refusing to bind ForgeAI to a non-loopback interface without authentication. "
-                "Use --auth and configure FORGEAI_AUTH_SECRET_KEY plus "
-                "FORGEAI_BOOTSTRAP_API_KEY."
+        if not auth_requested and not is_loopback_host(host):
+            if not insecure_no_auth:
+                handle_cli_error(
+                    f"refusing to listen on non-loopback host '{host}' with authentication disabled. "
+                    "Enable auth (--auth or FORGEAI_AUTH_ENABLED=true with FORGEAI_AUTH_SECRET_KEY and "
+                    "FORGEAI_BOOTSTRAP_API_KEY), bind to 127.0.0.1, or pass --insecure-no-auth "
+                    "(env FORGEAI_INSECURE_NO_AUTH=true) to accept the risk."
+                )
+            console.print(
+                f"[bold red]WARNING[/bold red] serving on '{host}' with authentication DISABLED "
+                "(--insecure-no-auth). Anyone who can reach this port can pull/delete models."
             )
 
-        settings_kwargs: dict[str, object] = {
+        settings_kwargs: dict[str, Any] = {
             "host": host,
             "port": port,
             "auth_enabled": auth_requested,
@@ -122,8 +143,10 @@ def serve(
 
         auth_manager = None
         if auth_requested:
-            if settings.auth_secret_key == "change-me-in-production":
-                handle_cli_error("auth is enabled but the secret key is still the default. Set FORGEAI_AUTH_SECRET_KEY before starting the server.")
+            try:
+                validate_auth_secret(settings.auth_secret_key)
+            except ValueError as err:
+                handle_cli_error(f"auth is enabled but {err}")
             if not settings.bootstrap_api_key:
                 handle_cli_error("auth is enabled but no bootstrap API key is configured. Set FORGEAI_BOOTSTRAP_API_KEY before starting the server.")
 
@@ -147,7 +170,8 @@ def serve(
     console.print("\n[bold cyan]ForgeAI Server[/bold cyan]")
     console.print(f"  Address:  http://{host}:{port}")
     console.print(f"  Auth:     {'enabled' if auth_requested else 'disabled'}")
-    console.print(f"  Docs:     http://{host}:{port}/docs\n")
+    docs_on = settings.docs_enabled if settings.docs_enabled is not None else not auth_requested
+    console.print(f"  Docs:     {f'http://{host}:{port}/docs' if docs_on else 'disabled'}\n")
 
     track_event("command.serve", {"host": host, "port": port})
 

@@ -1,18 +1,14 @@
 from __future__ import annotations
 
-import sys
 import unittest
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
 from forgeai.cli.main import app
 from forgeai.cli.runtime import DaemonClient
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 class RunCommandTests(unittest.TestCase):

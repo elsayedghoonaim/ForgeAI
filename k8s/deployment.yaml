@@ -19,11 +19,25 @@ spec:
         prometheus.io/port: "11434"
         prometheus.io/path: "/metrics"
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: forgeai
           image: forgeai:2.0.0
           command: ["forgeai", "serve"]
           args: ["--host", "0.0.0.0", "--port", "11434"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
           ports:
             - containerPort: 11434
               name: http
@@ -36,9 +50,29 @@ spec:
             - name: HOME
               value: "/data"
             - name: HF_HOME
-              value: "/data/.cache/huggingface"
+              value: "/data/huggingface"
             - name: FORGEAI_HOME
-              value: "/data/.forgeai"
+              value: "/data/forgeai"
+            - name: XDG_CACHE_HOME
+              value: "/data/.cache"
+            - name: TMPDIR
+              value: "/tmp"
+            - name: FORGEAI_AUTH_ENABLED
+              value: "true"
+            # Create with:
+            #   kubectl create secret generic forgeai-auth \
+            #     --from-literal=secret-key="$(openssl rand -hex 32)" \
+            #     --from-literal=bootstrap-api-key="$(openssl rand -hex 24)"
+            - name: FORGEAI_AUTH_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: forgeai-auth
+                  key: secret-key
+            - name: FORGEAI_BOOTSTRAP_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: forgeai-auth
+                  key: bootstrap-api-key
           resources:
             requests:
               cpu: "4"
@@ -67,7 +101,17 @@ spec:
           volumeMounts:
             - name: forgeai-data
               mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            - name: dshm
+              mountPath: /dev/shm
       volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
         - name: forgeai-data
           persistentVolumeClaim:
             claimName: forgeai-data-pvc

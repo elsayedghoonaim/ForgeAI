@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import asyncio
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,15 +9,12 @@ from typing import Any
 
 import httpx
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
 from forgeai.api.routes.chat import ChatCompletionRequest, create_chat_completion
 from forgeai.api.routes.ollama import generate
 from forgeai.api.runtime import SharedRuntimeAdapter
 from forgeai.api.schemas.ollama import OllamaGenerateRequest
 from forgeai.api.server import create_app
 from forgeai.core.backends.vllm_backend import VLLMBackend
-from forgeai.core.config import DevToolSettings
 from forgeai.core.engine import (
     EngineKey,
     EngineLease,
@@ -145,6 +140,8 @@ class FakeCacheManager:
     def __init__(self, hub_dir: Path) -> None:
         self.hub_dir = hub_dir
         self.download_snapshot_calls = []
+        self.scan_calls = []
+        self.scan_error: Exception | None = None
 
     def get_snapshot_path(self, repo_id: str, revision: str = "main") -> Path | None:
         snap = self.hub_dir / repo_id.replace("/", "--") / "snapshots" / "main"
@@ -153,8 +150,23 @@ class FakeCacheManager:
         (snap / "model.safetensors").write_text("weights", encoding="utf-8")
         return snap
 
-    def download_snapshot(self, repo_id: str, revision: str = "main", token: str | None = None) -> str:
-        self.download_snapshot_calls.append({"repo_id": repo_id, "revision": revision, "token": token})
+    def scan_snapshot_or_purge(self, snapshot_path: str, repo_id: str) -> dict:
+        self.scan_calls.append(repo_id)
+        if self.scan_error is not None:
+            raise self.scan_error
+        return {"safe": True}
+
+    def download_snapshot(
+        self,
+        repo_id: str,
+        revision: str = "main",
+        token: str | None = None,
+        trust_remote_code: bool = False,
+    ) -> str:
+        self.download_snapshot_calls.append(
+            {"repo_id": repo_id, "revision": revision, "token": token,
+             "trust_remote_code": trust_remote_code}
+        )
         if "fail_download" in repo_id:
             raise RuntimeError("Simulated network/download failure.")
         snap = self.get_snapshot_path(repo_id, revision)
@@ -307,7 +319,7 @@ class OllamaApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.cache_manager.download_snapshot_calls), 1)
         self.assertEqual(
             self.cache_manager.download_snapshot_calls[0],
-            {"repo_id": "org/model", "revision": "main", "token": None},
+            {"repo_id": "org/model", "revision": "main", "token": None, "trust_remote_code": False},
         )
 
         reg_manifest = self.model_registry.get_manifest("org/model:custom-v1")

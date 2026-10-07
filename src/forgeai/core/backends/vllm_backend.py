@@ -9,6 +9,7 @@ import inspect
 import math
 import os
 import tempfile
+import threading
 import warnings
 from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
@@ -16,15 +17,18 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-
 from rich.console import Console
 
-from forgeai.core.backends.base import BaseBackend, GenerationResult
+from forgeai.core.backends.base import BaseBackend, GenerationResult, StreamStats
 from forgeai.core.config import BackendType, DevToolSettings
 from forgeai.core.security import check_required_vllm_version
 from forgeai.utils.gpu import GPU_MEMORY_STARTUP_RESERVE_MB
 
 console = Console()
+
+# _startup_context mutates process-wide state (os.environ, warnings filters, logging
+# verbosity). Concurrent loads must not interleave their save/restore sequences.
+_STARTUP_LOCK = threading.Lock()
 
 QUIET_STARTUP_WARNING_FILTERS: tuple[tuple[str, type[Warning]], ...] = (
     (r".*unauthenticated requests to the HF Hub.*", UserWarning),
@@ -58,6 +62,24 @@ class VLLMBackend(BaseBackend):
     def supports_streaming(self) -> bool:
         return self._streaming_enabled
 
+    @property
+    def supports_concurrency(self) -> bool:
+        # AsyncLLM does continuous batching; the sync LLM fallback is not thread-safe.
+        return self._streaming_enabled
+
+    async def abort(self, request_id: str) -> None:
+        """Abort an in-flight request on the async engine (best effort)."""
+        engine = self._engine
+        abort_fn = getattr(engine, "abort", None) if engine is not None else None
+        if abort_fn is None:
+            return
+        try:
+            res = abort_fn(request_id)
+            if inspect.isawaitable(res):
+                await res
+        except Exception:
+            pass
+
     def initialize(self) -> None:
         """Initialize the vLLM engine."""
         if not (self.settings.model_name or self.settings.model_path):
@@ -67,8 +89,14 @@ class VLLMBackend(BaseBackend):
             if self.settings.enforce_version_check:
                 check_required_vllm_version(announce_success=not self._quiet_startup)
 
-            validate_turboquant_hardware(self.settings.kv_cache_dtype)
-            self._preflight_vllm_memory()
+            topology = _detect_topology_once()
+            if topology is not None:
+                validate_turboquant_hardware(
+                    self.settings.kv_cache_dtype, gpu_detector=lambda: topology
+                )
+            else:
+                validate_turboquant_hardware(self.settings.kv_cache_dtype)
+            self._preflight_vllm_memory(topology)
             if self._streaming_enabled:
                 self._init_vllm_async()
             else:
@@ -148,10 +176,20 @@ class VLLMBackend(BaseBackend):
 
     @contextmanager
     def _startup_context(self) -> Iterator[None]:
-        """Apply chat-friendly startup suppression without hiding real errors."""
+        """Apply chat-friendly startup suppression without hiding real errors.
+
+        Serialized by a module-level lock so concurrent loads cannot interleave their
+        process-wide environment/warnings mutations.
+        """
         if not self._quiet_startup:
             yield
             return
+        with _STARTUP_LOCK, self._startup_context_unlocked():
+            yield
+
+    @contextmanager
+    def _startup_context_unlocked(self) -> Iterator[None]:
+        """Quiet-startup environment mutation; callers must hold ``_STARTUP_LOCK``."""
 
         original_vllm_logging_level = os.environ.get("VLLM_LOGGING_LEVEL")
         original_hf_hub_verbosity = os.environ.get("HF_HUB_VERBOSITY")
@@ -205,22 +243,25 @@ class VLLMBackend(BaseBackend):
                     os.environ["PYTHONPATH"] = original_pythonpath
                 startup_site.cleanup()
 
-    def _preflight_vllm_memory(self) -> None:
-        """Fail early when the requested GPU utilization cannot fit in free VRAM."""
-        try:
-            from forgeai.utils.gpu import detect_gpus
-        except Exception:
-            return
+    def _preflight_vllm_memory(self, topology: Any = None) -> None:
+        """Fail early when the requested GPU utilization cannot fit in free VRAM.
 
-        topology = detect_gpus()
+        ``topology`` is the already-detected GPU topology; detected here if omitted.
+        """
+        if topology is None:
+            topology = _detect_topology_once()
+            if topology is None:
+                return
         if topology.gpu_count == 0:
             return
 
-        requested_gpus = self.settings.tensor_parallel_size
+        tp = self.settings.tensor_parallel_size
+        pp = getattr(self.settings, "pipeline_parallel_size", 1) or 1
+        requested_gpus = tp * pp
         if topology.gpu_count < requested_gpus:
             raise RuntimeError(
-                f"Tensor parallel size {requested_gpus} requires {requested_gpus} GPUs, "
-                f"but only {topology.gpu_count} GPU(s) were detected."
+                f"Tensor parallel size {tp} x pipeline parallel size {pp} requires "
+                f"{requested_gpus} GPUs, but only {topology.gpu_count} GPU(s) were detected."
             )
 
         requested_util = self.settings.gpu_memory_utilization
@@ -293,13 +334,13 @@ class VLLMBackend(BaseBackend):
 
         if self._streaming_enabled:
             return await self._generate_vllm_async(
-                prompt, max_tokens or 512, temperature, top_p, stop, top_k
+                prompt, (max_tokens if max_tokens is not None else 512), temperature, top_p, stop, top_k
             )
         else:
             return await asyncio.to_thread(
                 self._generate_vllm,
                 prompt,
-                max_tokens or 512,
+                (max_tokens if max_tokens is not None else 512),
                 temperature,
                 top_p,
                 stop,
@@ -403,6 +444,29 @@ class VLLMBackend(BaseBackend):
         top_k: int | None = None,
     ) -> AsyncIterator[str]:
         """Stream output deltas from the async vLLM runtime."""
+        async for chunk in self.stream_with_stats(
+            prompt,
+            stats=StreamStats(),
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            stop=stop,
+            top_k=top_k,
+        ):
+            yield chunk
+
+    async def stream_with_stats(
+        self,
+        prompt: str,
+        *,
+        stats: StreamStats,
+        max_tokens: int | None = 512,
+        temperature: float = 0.7,
+        top_p: float = 0.95,
+        stop: list[str] | None = None,
+        top_k: int | None = None,
+    ) -> AsyncIterator[str]:
+        """Stream deltas, recording token counts and finish reason in ``stats``."""
         if not self._is_running:
             raise RuntimeError("Engine is not initialized. Call initialize() first.")
 
@@ -415,7 +479,7 @@ class VLLMBackend(BaseBackend):
         from vllm.sampling_params import RequestOutputKind
 
         kwargs: dict[str, Any] = {
-            "max_tokens": max_tokens or 512,
+            "max_tokens": (max_tokens if max_tokens is not None else 512),
             "temperature": temperature,
             "top_p": top_p,
             "stop": stop,
@@ -429,13 +493,22 @@ class VLLMBackend(BaseBackend):
         async for output in self._engine.generate(
             prompt,
             params,
-            request_id=f"stream-{uuid4().hex}",
+            request_id=stats.request_id,
         ):
+            prompt_token_ids = getattr(output, "prompt_token_ids", None)
+            if prompt_token_ids:
+                stats.prompt_tokens = len(prompt_token_ids)
             outputs = getattr(output, "outputs", []) or []
             if not outputs:
                 continue
 
             completion = outputs[0]
+            token_ids = getattr(completion, "token_ids", None)
+            if token_ids:
+                stats.completion_tokens += len(token_ids)
+            finish_reason = getattr(completion, "finish_reason", None)
+            if finish_reason:
+                stats.finish_reason = finish_reason
             chunk = getattr(completion, "text", "")
             if chunk:
                 yield chunk
@@ -474,10 +547,6 @@ class VLLMBackend(BaseBackend):
             self._engine = None
             self._tokenizer = None
         with contextlib.suppress(Exception):
-            import ray
-            if ray.is_initialized():
-                ray.shutdown()
-        with contextlib.suppress(Exception):
             gc.collect()
         with contextlib.suppress(Exception):
             import torch
@@ -485,6 +554,16 @@ class VLLMBackend(BaseBackend):
             torch.cuda.empty_cache()
         self._is_running = False
         console.print("[yellow]vLLM Engine shut down.[/yellow]")
+
+
+def _detect_topology_once() -> Any:
+    """Detect GPUs once; returns None if detection is unavailable."""
+    try:
+        from forgeai.utils.gpu import detect_gpus
+
+        return detect_gpus()
+    except Exception:
+        return None
 
 
 def _normalize_embeddings(raw_output: Any) -> list[list[float]]:

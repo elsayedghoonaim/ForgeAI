@@ -5,21 +5,22 @@ from __future__ import annotations
 import os
 import platform
 import sys
-from datetime import datetime, timezone
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 import typer
 from rich.console import Console
 from rich.markup import escape
-from rich.panel import Panel
-from rich.table import Table
 
 console = Console()
 app = typer.Typer(invoke_without_command=True)
 
 
-def check_python_version(sys_version_info: tuple[int, ...] = sys.version_info) -> tuple[bool, str]:
+def check_python_version(sys_version_info: Sequence[int] | None = None) -> tuple[bool, str]:
     """Check Python version requirement: >= 3.12, < 3.13 (Python 3.12)."""
+    if sys_version_info is None:
+        sys_version_info = tuple(sys.version_info[:3])
     py_ver = f"{sys_version_info[0]}.{sys_version_info[1]}.{sys_version_info[2]}"
     py_ok = (3, 12) <= (sys_version_info[0], sys_version_info[1]) < (3, 13)
     detail = f"Installed: {py_ver}" if py_ok else f"Installed: {py_ver} → Upgrade to Python 3.12"
@@ -28,7 +29,7 @@ def check_python_version(sys_version_info: tuple[int, ...] = sys.version_info) -
 
 def check_vllm_diagnostic(vllm_module: Any = None) -> tuple[bool, str]:
     """Check the exact vLLM version required by the ForgeAI runtime contract."""
-    from forgeai.core.security import REQUIRED_VLLM_VERSION, _parse_version
+    from forgeai.core.security import REQUIRED_VLLM_VERSION, vllm_version_matches
 
     remediation = f"pip install 'vllm=={REQUIRED_VLLM_VERSION}'"
 
@@ -47,12 +48,7 @@ def check_vllm_diagnostic(vllm_module: Any = None) -> tuple[bool, str]:
     if ver is None:
         return False, f"Installed: unknown → {remediation}"
 
-    try:
-        installed_ver = _parse_version(str(ver))
-        req_ver = _parse_version(REQUIRED_VLLM_VERSION)
-        if installed_ver.public != req_ver.public:
-            return False, escape(f"Installed: {ver} → {remediation}")
-    except Exception:
+    if not vllm_version_matches(ver):
         return False, escape(f"Installed: {ver} → {remediation}")
 
     return True, escape(f"Installed: {ver}")
@@ -161,9 +157,10 @@ def doctor(
     full: bool = typer.Option(False, "--full", help="Run full audit report"),
 ) -> None:
     """System diagnostics with actionable remediation and deployment audit report."""
+    from rich.table import Table
     console.print("\n[bold cyan]ForgeAI Doctor[/bold cyan]\n")
-    from forgeai.core.telemetry import track_event
     from forgeai.core.security import REQUIRED_VLLM_VERSION
+    from forgeai.core.telemetry import track_event
 
     track_event("command.doctor")
 
@@ -241,9 +238,10 @@ def doctor(
 
 def _print_audit_report(checks: list[tuple[str, bool, str]], score: float) -> None:
     """Generate full deployment audit report."""
+    from rich.panel import Panel
     report = (
         f"[bold]Deployment Audit Report[/bold]\n"
-        f"Date:     {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
+        f"Date:     {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}\n"
         f"Platform: {platform.system()} {platform.release()}\n"
         f"Python:   {sys.version.split()[0]}\n"
         f"Score:    {score:.0f}/100\n\n"

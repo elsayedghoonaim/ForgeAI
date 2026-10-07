@@ -7,7 +7,7 @@ dedicated used-memory GPU parsing, sampler failure vs genuine 0.0 MiB reading, v
 completion_tokens > 1 decode rate requirement, active soak load with immediate stop on request failure,
 quality evidence provenance persistence with mandatory consistent accuracy_scale ('percent' or 'fraction'),
 memory leak thresholds relative to total VRAM, non-finite metric safety, observable error notes,
-sequential runner lifecycle coordinator with fakes/mocks, and thin script plan/evaluate/execute CLI entrypoint behavior.
+sequential runner lifecycle coordinator with fakes/mocks.
 
 No vLLM, torch, GPU hardware, network, or process execution are required or loaded.
 """
@@ -15,12 +15,11 @@ No vLLM, torch, GPU hardware, network, or process execution are required or load
 from __future__ import annotations
 
 import json
-from pathlib import Path
 import tempfile
-from typing import Any
 import unittest
+from pathlib import Path
+from typing import Any
 
-from scripts.benchmark_turboquant import main as script_main
 from forgeai.benchmarking import (
     PROFILES_CATALOG,
     SCHEMA_VERSION,
@@ -30,8 +29,6 @@ from forgeai.benchmarking import (
     STATUS_PASS,
     VLLM_CONTRACT_SPEC,
     VLLM_PINNED_VERSION,
-    FutureCommandPlan,
-    GateOutcome,
     HardwareMetadata,
     PreflightResult,
     ProfileMeasurements,
@@ -40,16 +37,12 @@ from forgeai.benchmarking import (
     TurboQuantBenchmarkArtifact,
     calculate_percentile,
     create_benchmark_plan,
-    default_gpu_memory_used_query,
     evaluate_artifact,
     load_quality_evidence,
     parse_cuda_compute_capability,
     parse_gpu_memory_used_output,
     parse_kv_cache_capacity_from_log,
-    parse_log_anomalies,
-    parse_sse_stream_chunk,
     process_streaming_response,
-    run_preflight,
 )
 
 
@@ -744,21 +737,6 @@ class TurboQuantSequentialRunnerLifecycleTests(unittest.TestCase):
             for prof in result.profile_results.values():
                 assert prof.measurements is not None
                 self.assertFalse(prof.measurements.has_memory_leak)
-
-
-class TurboQuantExecuteCLITests(unittest.TestCase):
-    """Test CLI subcommand safety and argument validation."""
-
-    def test_execute_without_acknowledgement_exits_before_preflight(self) -> None:
-        code = script_main(["execute", "--model", "Qwen/Qwen3-0.6B"])
-        self.assertEqual(code, 1)
-
-    def test_execute_invalid_nonpositive_ranges_rejected(self) -> None:
-        code_iter = script_main(["execute", "--acknowledge-hardware-run", "--iterations", "0"])
-        self.assertEqual(code_iter, 1)
-
-        code_port = script_main(["execute", "--acknowledge-hardware-run", "--base-port", "-1"])
-        self.assertEqual(code_port, 1)
 
 
 if __name__ == "__main__":

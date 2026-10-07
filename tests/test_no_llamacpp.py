@@ -80,11 +80,16 @@ def test_python_source_no_runtime_llamacpp_symbols() -> None:
                     violations.append(
                         f"{rel_path}:{node.lineno} - Forbidden symbol reference: '{node.id}'"
                     )
-            elif isinstance(node, ast.Attribute):
-                if node.attr in forbidden_symbols and node.attr != "reject_legacy_llamacpp_options":
-                    violations.append(
-                        f"{rel_path}:{node.lineno} - Forbidden attribute access: '.{node.attr}'"
-                    )
+
+            # Check AST Attribute references for runtime symbol access (e.g. module.LlamaCppBackend)
+            elif (
+                isinstance(node, ast.Attribute)
+                and node.attr in forbidden_symbols
+                and node.attr != "reject_legacy_llamacpp_options"
+            ):
+                violations.append(
+                    f"{rel_path}:{node.lineno} - Forbidden attribute access: '.{node.attr}'"
+                )
 
     assert not violations, "Found forbidden runtime llama.cpp/GGUF symbols in src/:\n" + "\n".join(violations)
 
@@ -187,7 +192,11 @@ def test_pyproject_toml_and_dockerfile_dependencies() -> None:
 
 
 def test_pyproject_toml_python_version_and_vllm_pinning() -> None:
-    """Verify Python 3.12 and the exact vLLM 0.30.0 runtime contract in every supported extra."""
+    """
+    Verify pyproject.toml requires Python >=3.12,<3.13 and requires every vLLM dependency
+    across all optional extras to be strictly 'vllm==0.30.0' with no extra markers or specifier variants,
+    and requires a single 'vllm' extra with exactly one such pin ('gpu' and 'all' alias it).
+    """
     pyproject_path = REPO_ROOT / "pyproject.toml"
     pyproject_data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
 
@@ -199,16 +208,13 @@ def test_pyproject_toml_python_version_and_vllm_pinning() -> None:
     required_vllm_extras = ["gpu", "vllm", "all"]
     expected_vllm = "vllm==0.30.0"
 
+    # 1. 'vllm' extra holds exactly one pin; 'gpu' and 'all' are aliases of it
     for extra in required_vllm_extras:
         assert extra in opt_deps, f"Expected optional dependency extra '{extra}' in pyproject.toml"
-        extra_deps = opt_deps[extra]
-        vllm_reqs = [dep for dep in extra_deps if _extract_package_name(dep) == "vllm"]
-        assert len(vllm_reqs) == 1, (
-            f"Extra '{extra}' must contain exactly one vLLM requirement pin, found {len(vllm_reqs)}: {vllm_reqs}"
-        )
-        assert vllm_reqs[0].strip() == expected_vllm, (
-            f"Extra '{extra}' vLLM requirement must be exactly '{expected_vllm}', found {vllm_reqs[0]!r}"
-        )
+    vllm_reqs = [dep for dep in opt_deps["vllm"] if _extract_package_name(dep) == "vllm"]
+    assert vllm_reqs == ["vllm==0.30.0"], f"Extra 'vllm' must pin exactly 'vllm==0.30.0', found {vllm_reqs}"
+    for alias in ("gpu", "all"):
+        assert opt_deps[alias] == ["forgeai[vllm]"], f"Extra '{alias}' must alias 'forgeai[vllm]'"
 
     for extra_name, dep_list in opt_deps.items():
         for dep in dep_list:
@@ -240,11 +246,13 @@ def test_backend_factory_and_config_no_auto_or_llama_selection() -> None:
         f"BackendType Enum in config.py must contain only ['vllm'], found {backend_enum_values}"
     )
 
+    # Check create_backend in factory.py
     factory_content = factory_path.read_text(encoding="utf-8")
-    assert "BackendType.VLLM" in factory_content, "factory.py must resolve to BackendType.VLLM"
     assert "VLLMBackend" in factory_content, "factory.py must instantiate VLLMBackend"
     assert "LlamaCppBackend" not in factory_content, "factory.py must not reference LlamaCppBackend"
 
-    assert "GGUF model format is unsupported" in factory_content or "GGUF model format" in factory_content, (
-        "factory.py should retain explicit actionable GGUF rejection message"
+    # Verify legacy rejection validator or error raising is present
+    assert "reject_gguf" in factory_content, "factory.py should retain explicit GGUF rejection"
+    assert "GGUF model format is unsupported" in config_path.read_text(encoding="utf-8"), (
+        "config.py should retain the actionable GGUF rejection message"
     )

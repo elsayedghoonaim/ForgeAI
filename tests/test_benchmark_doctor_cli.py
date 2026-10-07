@@ -62,36 +62,78 @@ class BenchmarkCLITests(unittest.TestCase):
 
     def test_benchmark_evaluate_handles_pass_and_non_pass_exit_codes(self) -> None:
         from forgeai.benchmarking.turboquant import (
-            STATUS_NOT_RUN,
             STATUS_PASS,
+            GateOutcome,
+            HardwareMetadata,
+            ProfileMeasurements,
             TurboQuantBenchmarkArtifact,
+            create_benchmark_plan,
+            evaluate_artifact,
         )
 
-        artifact = TurboQuantBenchmarkArtifact(model="Qwen/Qwen3-0.6B")
-        artifact_file = self.work_path / "artifact.json"
-        artifact_file.write_text(artifact.to_json(), encoding="utf-8")
+        def measured(capacity: int, ttft: float, decode: float, ppl: float) -> ProfileMeasurements:
+            return ProfileMeasurements(
+                idle_process_rss_mb=500.0,
+                idle_gpu_memory_mb=300.0,
+                model_load_duration_seconds=10.0,
+                cold_load_peak_vram_mb=9000.0,
+                cold_load_steady_vram_mb=8000.0,
+                kv_cache_capacity_tokens=capacity,
+                ttft_p50_ms=ttft / 2,
+                ttft_p95_ms=ttft,
+                decode_tokens_per_sec=decode,
+                prompt_throughput_tokens_per_sec=5000.0,
+                perplexity=ppl,
+                task_accuracy=80.0,
+                long_context_accuracy=70.0,
+                crashes_count=0,
+                nans_count=0,
+                has_memory_leak=False,
+                post_unload_residual_vram_mb=10.0,
+                soak_duration_seconds=1800.0,
+            )
 
-        pass_result = TurboQuantBenchmarkArtifact.from_dict(artifact.to_dict())
-        pass_result.status = STATUS_PASS
-        with (
-            patch("forgeai.core.telemetry.track_event"),
-            patch("forgeai.benchmarking.turboquant.evaluate_artifact", return_value=pass_result),
-        ):
+        # 1. Fully measured, passing artifact
+        pass_artifact = create_benchmark_plan(model="Qwen/Qwen3-0.6B")
+        pass_artifact.hardware_validation_performed = True
+        pass_artifact.hardware = HardwareMetadata(
+            device_name="NVIDIA A100",
+            cuda_compute_capability=(8, 0),
+            total_vram_mb=40960.0,
+            driver_version="550.54",
+            platform="cuda",
+        )
+        profs = pass_artifact.profile_results
+        profs["auto"].measurements = measured(100_000, 100.0, 100.0, 10.0)
+        profs["fp8"].measurements = measured(200_000, 100.0, 95.0, 10.1)
+        profs["turboquant_4bit_nc"].measurements = measured(380_000, 110.0, 90.0, 10.1)
+        profs["turboquant_3bit_nc"].measurements = measured(490_000, 120.0, 80.0, 10.2)
+
+        evaluated = evaluate_artifact(pass_artifact)
+        self.assertEqual(evaluated.status, STATUS_PASS)
+        self.assertIsInstance(evaluated.gate_outcomes["turboquant_4bit_nc"], GateOutcome)
+
+        pass_file = self.work_path / "pass_artifact.json"
+        pass_file.write_text(pass_artifact.to_json(), encoding="utf-8")
+
+        with patch("forgeai.core.telemetry.track_event"):
             res_pass = self.runner.invoke(
                 app,
-                ["benchmark", "--mode", "evaluate", "--input", str(artifact_file)],
+                ["benchmark", "--mode", "evaluate", "--input", str(pass_file)],
             )
-        self.assertEqual(res_pass.exit_code, 0)
+        self.assertEqual(res_pass.exit_code, 0, res_pass.output)
 
-        non_pass_result = TurboQuantBenchmarkArtifact.from_dict(artifact.to_dict())
-        non_pass_result.status = STATUS_NOT_RUN
-        with (
-            patch("forgeai.core.telemetry.track_event"),
-            patch("forgeai.benchmarking.turboquant.evaluate_artifact", return_value=non_pass_result),
-        ):
+        # 2. Non-passing artifact (blank template, nothing measured)
+        fail_artifact = TurboQuantBenchmarkArtifact.from_dict(
+            create_benchmark_plan(model="Qwen/Qwen3-0.6B").to_dict()
+        )
+        fail_file = self.work_path / "fail_artifact.json"
+        fail_file.write_text(fail_artifact.to_json(), encoding="utf-8")
+
+        with patch("forgeai.core.telemetry.track_event"):
             res_fail = self.runner.invoke(
                 app,
-                ["benchmark", "--mode", "evaluate", "--input", str(artifact_file)],
+                ["benchmark", "--mode", "evaluate", "--input", str(fail_file)],
             )
         self.assertEqual(res_fail.exit_code, 1)
 

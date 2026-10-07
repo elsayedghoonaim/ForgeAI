@@ -7,12 +7,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import typer
-import yaml
 from rich.console import Console
 
-from forgeai.cli.runtime import handle_cli_error
-from forgeai.models.manifest import ForgeAIManifest
-from forgeai.models.registry import ModelRegistry
+from forgeai.cli.runtime import exit_if_gguf, handle_cli_error
 
 console = Console()
 app = typer.Typer(invoke_without_command=True)
@@ -31,10 +28,7 @@ def _is_ollama_modelfile(content: str) -> bool:
     first_word = lines[0].split()[0].lower() if lines[0].split() else ""
     if first_word in directives:
         return True
-    for line in lines:
-        if line.split()[0].lower() in directives:
-            return True
-    return False
+    return any(line.split()[0].lower() in directives for line in lines)
 
 
 @app.callback(invoke_without_command=True)
@@ -52,6 +46,11 @@ def create(
     ),
 ) -> None:
     """Create and register a local model tag from a ForgeAI YAML manifest."""
+    import yaml
+
+    from forgeai.models.manifest import ForgeAIManifest
+    from forgeai.models.registry import ModelRegistry
+
     try:
         content = file.read_text(encoding="utf-8")
     except Exception as err:
@@ -72,19 +71,7 @@ def create(
 
     # Explicit GGUF rejection before schema validation
     model_ref = str(yaml_data.get("model") or model).strip()
-    model_ref_lower = model_ref.lower()
-    model_tag_lower = model.lower()
-    if (
-        model_ref_lower.endswith(".gguf")
-        or ".gguf" in model_ref_lower
-        or model_tag_lower.endswith(".gguf")
-        or ".gguf" in model_tag_lower
-    ):
-        handle_cli_error(
-            f"ERROR: GGUF model format is unsupported in ForgeAI v2.0+ (model: {model_ref!r}). "
-            "llama.cpp has been removed in favor of vLLM. "
-            "Remediation: Specify a Hugging Face repo ID or local safetensors directory."
-        )
+    exit_if_gguf(model_ref, model)
 
     # Override public name consistently with MODEL argument
     yaml_data["name"] = model

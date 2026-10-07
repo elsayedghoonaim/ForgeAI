@@ -44,6 +44,23 @@ jobs:
         # once vLLM permits setuptools>=83 at runtime.
         run: pip-audit --strict --desc --ignore-vuln PYSEC-2026-3447
 
+  trivy:
+    name: Trivy Filesystem and Config Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Trivy scan (vulnerabilities, secrets, misconfiguration)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
   codeql:
     name: CodeQL Analysis
     runs-on: ubuntu-latest

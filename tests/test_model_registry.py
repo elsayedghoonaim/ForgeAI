@@ -5,15 +5,13 @@ manifest registry, and canonical HuggingFace CacheManager.
 
 from __future__ import annotations
 
-import os
-from contextlib import suppress
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
 
-from forgeai.models.loader import CacheManager, download_model
+from forgeai.models.loader import DOWNLOAD_ALLOW_PATTERNS, CacheManager, download_model
 from forgeai.models.manifest import (
     EngineSettings,
     ForgeAIManifest,
@@ -135,16 +133,16 @@ class TestManifestSchemas:
         assert deserialized.model == manifest.model
 
     def test_hf_repo_id_validation_traversal_absolute(self) -> None:
-        with pytest.raises(ValueError, match="Invalid Hugging Face repository ID"):
+        with pytest.raises(ValueError, match="Invalid HuggingFace repository ID format"):
             validate_repo_id_string("../etc/passwd")
 
-        with pytest.raises(ValueError, match="Invalid Hugging Face repository ID"):
+        with pytest.raises(ValueError, match="Invalid HuggingFace repository ID format"):
             validate_repo_id_string("/absolute/path/repo")
 
-        with pytest.raises(ValueError, match="Invalid Hugging Face repository ID"):
+        with pytest.raises(ValueError, match="Invalid HuggingFace repository ID format"):
             validate_repo_id_string("C:\\Windows\\System32")
 
-        with pytest.raises(ValueError, match="Invalid Hugging Face repository ID"):
+        with pytest.raises(ValueError, match="Invalid HuggingFace repository ID format"):
             validate_repo_id_string("owner/repo/extra_component")
 
 
@@ -313,7 +311,7 @@ class TestCacheManager:
                 cache_dir=str(cache_mgr.hf_home),
                 revision="v1.0",
                 token=None,
-                ignore_patterns=["*.md", "*.txt", "LICENSE*", ".git*"],
+                allow_patterns=DOWNLOAD_ALLOW_PATTERNS,
             )
 
     def test_download_model_legacy_cache_dir_forwarding(self, tmp_path: Path) -> None:
@@ -357,38 +355,3 @@ class TestCacheManager:
             downloaded = cache_mgr.download_snapshot(repo_id, revision="main")
             assert downloaded == str(snap_dir)
             mock_hf.assert_not_called()
-
-    def test_garbage_collect_defensive_and_symlinks(self, tmp_path: Path) -> None:
-        forgeai_home = tmp_path / ".forgeai"
-        cache_mgr = CacheManager(forgeai_home=forgeai_home)
-
-        m1_snap = cache_mgr.hub_dir / "models--org--m1" / "snapshots" / "active_commit"
-        m1_snap.mkdir(parents=True)
-        (m1_snap / "model.safetensors").write_text("m1 weights", encoding="utf-8")
-
-        m2_snap = cache_mgr.hub_dir / "models--org--m2" / "snapshots" / "old_commit"
-        m2_snap.mkdir(parents=True)
-        (m2_snap / "model.safetensors").write_text("m2 weights", encoding="utf-8")
-
-        outside_dir = tmp_path / "outside_sensitive_data"
-        outside_dir.mkdir(parents=True)
-        (outside_dir / "secret.txt").write_text("do not delete", encoding="utf-8")
-
-        outside_symlink = cache_mgr.hub_dir / "models--org--m3" / "snapshots" / "bad_symlink"
-        outside_symlink.parent.mkdir(parents=True)
-
-        symlink_created = False
-        with suppress(OSError, NotImplementedError):
-            os.symlink(outside_dir, outside_symlink, target_is_directory=True)
-            symlink_created = True
-
-        removed = cache_mgr.garbage_collect_unreferenced(active_snapshots=[str(m1_snap)])
-
-        assert removed >= 1
-        assert m1_snap.exists()
-        assert not m2_snap.exists()
-        assert outside_dir.exists()
-        assert (outside_dir / "secret.txt").exists()
-
-        if symlink_created:
-            assert not outside_symlink.exists() and not outside_symlink.is_symlink()

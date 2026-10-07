@@ -6,7 +6,6 @@ import typer
 from rich.console import Console
 
 from forgeai.cli.runtime import DaemonClient, DaemonClientError, handle_cli_error
-from forgeai.core.telemetry import track_event
 
 console = Console()
 
@@ -22,6 +21,8 @@ def pull(
     For private HuggingFace models, credentials must be configured in the daemon
     environment (e.g. HF_TOKEN or HUGGING_FACE_HUB_TOKEN).
     """
+
+    from forgeai.core.telemetry import track_event
 
     track_event("command.pull", {"model": model, "stream": stream})
 
@@ -53,7 +54,7 @@ def pull(
 
             console.print("\n[green]OK[/green] Model ready.")
         else:
-            res = client.request("POST", "/api/pull", json_data=payload)
+            res = client.request("POST", "/api/pull", json_data=payload, long=True)
             status = res.get("status")
             digest = res.get("digest")
 

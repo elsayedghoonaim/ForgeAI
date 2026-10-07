@@ -19,7 +19,7 @@ from forgeai.cli.main import app
 from forgeai.cli.runtime import DaemonClient, DaemonClientError, resolve_base_url
 from forgeai.models.manifest import ForgeAIManifest
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner(env={"COLUMNS": "200"})
 
 
 class FakeResponse:
@@ -56,8 +56,7 @@ class FakeResponse:
         return self._content.decode("utf-8")
 
     def iter_lines(self) -> Any:
-        for line in self._lines:
-            yield line
+        yield from self._lines
 
 
 class FakeClient:
@@ -415,20 +414,21 @@ class OllamaCliCommandsTests(unittest.TestCase):
 
     @patch.object(DaemonClient, "request")
     def test_stop_command_success(self, mock_request: MagicMock) -> None:
-        mock_request.return_value = {"done": True}
+        mock_request.return_value = {"model": "gemma-2-9b-it:latest", "unloaded": True}
         result = runner.invoke(app, ["stop", "gemma-2-9b-it:latest"])
         self.assertEqual(result.exit_code, 0)
         self.assertIn("stopped 'gemma-2-9b-it:latest'", result.stdout)
         mock_request.assert_called_once_with(
-            "POST",
-            "/api/generate",
-            json_data={
-                "model": "gemma-2-9b-it:latest",
-                "prompt": "",
-                "stream": False,
-                "keep_alive": 0,
-            },
+            "POST", "/api/unload", json_data={"model": "gemma-2-9b-it:latest"}
         )
+
+    @patch.object(DaemonClient, "request")
+    def test_stop_command_reports_not_loaded(self, mock_request: MagicMock) -> None:
+        mock_request.return_value = {"model": "m:latest", "unloaded": False}
+        result = runner.invoke(app, ["stop", "m:latest"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("was not loaded", result.stdout)
+        self.assertNotIn("stopped", result.stdout)
 
     @patch("forgeai.models.registry.ModelRegistry.register_manifest")
     def test_create_command_valid_yaml(self, mock_register: MagicMock) -> None:
@@ -672,6 +672,7 @@ class OllamaServePullRunCommandsTests(unittest.TestCase):
             "POST",
             "/api/pull",
             json_data={"name": "gemma-2-9b-it", "stream": False},
+            long=True,
         )
 
     @patch.object(DaemonClient, "stream")
@@ -738,6 +739,7 @@ class OllamaServePullRunCommandsTests(unittest.TestCase):
             "POST",
             "/api/generate",
             json_data={"model": "gemma-2-9b-it", "prompt": "Say hello", "stream": False},
+            long=True,
         )
 
     @patch.object(DaemonClient, "stream")
@@ -791,14 +793,18 @@ class OllamaServePullRunCommandsTests(unittest.TestCase):
     @patch("builtins.input", side_effect=["First turn", "/bye"])
     @patch.object(DaemonClient, "stream")
     def test_run_interactive_reuse_and_exit(self, mock_stream: MagicMock, mock_input: MagicMock) -> None:
-        mock_stream.return_value = iter([{"response": "Turn 1 answer"}])
+        mock_stream.return_value = iter([{"message": {"role": "assistant", "content": "Turn 1 answer"}}])
         res = runner.invoke(app, ["run", "gemma-2-9b-it"])
         self.assertEqual(res.exit_code, 0)
         self.assertIn("Turn 1 answer", res.stdout)
         mock_stream.assert_called_once_with(
             "POST",
-            "/api/generate",
-            json_data={"model": "gemma-2-9b-it", "prompt": "First turn", "stream": True},
+            "/api/chat",
+            json_data={
+                "model": "gemma-2-9b-it",
+                "messages": [{"role": "user", "content": "First turn"}],
+                "stream": True,
+            },
         )
 
     @patch.object(DaemonClient, "stream")

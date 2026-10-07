@@ -6,7 +6,6 @@ from typing import Any
 
 from typer.testing import CliRunner
 
-
 # Click removed CliRunner(mix_stderr=...) while older ForgeAI tests still pass
 # the argument. Typer delegates directly to Click, so accept and discard the
 # obsolete test-only option until those call sites are modernized.

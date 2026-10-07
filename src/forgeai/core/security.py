@@ -30,6 +30,14 @@ def _parse_version(version_str: str) -> Version:
     return Version(version_str)
 
 
+def vllm_version_matches(installed: object, required: str = REQUIRED_VLLM_VERSION) -> bool:
+    """Return True if ``installed`` equals ``required`` ignoring local build metadata."""
+    try:
+        return _parse_version(str(installed)).public == _parse_version(str(required)).public
+    except InvalidVersion:
+        return False
+
+
 def check_required_vllm_version(
     required_version: str = REQUIRED_VLLM_VERSION,
     *,
@@ -69,14 +77,13 @@ def check_required_vllm_version(
         )
 
     try:
-        installed_ver = _parse_version(str(installed))
-        req_ver = _parse_version(str(required_version))
+        _parse_version(str(installed))
     except InvalidVersion as ev:
         raise RuntimeError(
             f"Invalid vLLM version string format: {installed!r}. Details: {ev}"
         ) from ev
 
-    if installed_ver.public != req_ver.public:
+    if not vllm_version_matches(installed, required_version):
         raise RuntimeError(
             f"SECURITY / CONTRACT: ForgeAI requires exact vLLM version {required_version}, "
             f"but found {installed}.\n"

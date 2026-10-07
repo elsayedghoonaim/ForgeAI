@@ -17,25 +17,25 @@ No subprocess/network/GPU side effects occur on import or during unit tests.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import importlib.metadata
 import json
+import logging
 import math
 import os
-from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
 from forgeai.benchmarking.turboquant import (
     PROFILES_CATALOG,
-    STATUS_FAIL,
     STATUS_INCOMPLETE,
-    STATUS_NOT_RUN,
-    STATUS_PASS,
     VLLM_CONTRACT_SPEC,
     VLLM_PINNED_VERSION,
     HardwareMetadata,
@@ -43,8 +43,28 @@ from forgeai.benchmarking.turboquant import (
     ProfileResult,
     TurboQuantBenchmarkArtifact,
     evaluate_artifact,
+    max_allowed_unload_vram_mb,
     parse_cuda_compute_capability,
 )
+from forgeai.core.security import vllm_version_matches
+
+logger = logging.getLogger(__name__)
+
+NVIDIA_SMI_TIMEOUT_SECONDS = 15.0
+
+
+def _spawn_server_process(argv: Any, stdout: Any = None, stderr: Any = None, shell: bool = False) -> Any:
+    """Start the server in its own session / process group so teardown can kill the whole tree.
+
+    vLLM spawns EngineCore and worker processes; killing only the direct child leaves them
+    holding VRAM.
+    """
+    kwargs: dict[str, Any] = {}
+    if os.name == "posix":
+        kwargs["start_new_session"] = True
+    else:
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    return subprocess.Popen(argv, stdout=stdout, stderr=stderr, shell=shell, **kwargs)
 
 
 @dataclass
@@ -84,6 +104,7 @@ def default_gpu_query() -> HardwareMetadata:
         text=True,
         check=True,
         shell=False,
+        timeout=NVIDIA_SMI_TIMEOUT_SECONDS,
     )
     line = res.stdout.strip().splitlines()[0]
     parts = [p.strip() for p in line.split(",")]
@@ -118,9 +139,14 @@ def default_gpu_memory_used_query() -> float | None:
             text=True,
             check=True,
             shell=False,
+            timeout=NVIDIA_SMI_TIMEOUT_SECONDS,
         )
         return parse_gpu_memory_used_output(res.stdout)
-    except Exception:
+    except subprocess.TimeoutExpired:
+        logger.warning("nvidia-smi timed out after %.0fs", NVIDIA_SMI_TIMEOUT_SECONDS)
+        return None
+    except Exception as err:
+        logger.warning("nvidia-smi memory query failed: %s", err)
         return None
 
 
@@ -179,7 +205,7 @@ def run_preflight(
     installed_ver = ""
     try:
         installed_ver = get_vllm_ver()
-        if installed_ver != VLLM_PINNED_VERSION:
+        if not vllm_version_matches(installed_ver, VLLM_PINNED_VERSION):
             errors.append(
                 f"Installed vLLM version '{installed_ver}' does not match required contract version '{VLLM_PINNED_VERSION}'."
             )
@@ -214,7 +240,7 @@ def run_preflight(
         passed=passed,
         errors=errors,
         hardware=hw,
-        vllm_version=VLLM_CONTRACT_SPEC if installed_ver == VLLM_PINNED_VERSION else f"vllm=={installed_ver}",
+        vllm_version=VLLM_CONTRACT_SPEC if vllm_version_matches(installed_ver, VLLM_PINNED_VERSION) else f"vllm=={installed_ver}",
     )
 
 
@@ -260,7 +286,7 @@ def load_quality_evidence(path: str | Path) -> dict[str, dict[str, Any]]:
         if not isinstance(prof_info, dict):
             continue
 
-        prof_prov = prof_info.get("provenance", {})
+        prof_prov = prof_info.get("provenance") or prof_info
         prof_scale = (
             prof_prov.get("accuracy_scale")
             if isinstance(prof_prov, dict)
@@ -296,12 +322,12 @@ def load_quality_evidence(path: str | Path) -> dict[str, dict[str, Any]]:
             )
 
         dataset_str = (
-            top_provenance.get("dataset")
+            (top_provenance or {}).get("dataset")
             if has_top_prov
             else (prof_prov.get("dataset") if isinstance(prof_prov, dict) else prof_info.get("dataset"))
         )
         evaluator_str = (
-            top_provenance.get("evaluator")
+            (top_provenance or {}).get("evaluator")
             if has_top_prov
             else (prof_prov.get("evaluator") if isinstance(prof_prov, dict) else prof_info.get("evaluator"))
         )
@@ -458,9 +484,8 @@ def process_streaming_response(
                 if text_content is None and isinstance(choice.get("delta"), dict):
                     text_content = choice.get("delta", {}).get("content")
 
-                if text_content is not None and len(str(text_content)) > 0:
-                    if t_first is None:
-                        t_first = ts
+                if text_content is not None and len(str(text_content)) > 0 and t_first is None:
+                    t_first = ts
 
         # Check usage object
         usage = data_obj.get("usage")
@@ -544,7 +569,9 @@ class SequentialBenchmarkRunner:
         self.acknowledge_hardware_run = acknowledge_hardware_run
 
         self.preflight_fn = preflight_fn if preflight_fn is not None else run_preflight
-        self.process_factory = process_factory if process_factory is not None else subprocess.Popen
+        # Only processes we spawn ourselves are known to lead their own process group.
+        self._owns_process_group = process_factory is None
+        self.process_factory = process_factory if process_factory is not None else _spawn_server_process
         self.http_client_factory = http_client_factory
         self.gpu_sampler_fn = (
             gpu_sampler_fn
@@ -622,11 +649,11 @@ class SequentialBenchmarkRunner:
             prof_res.status = STATUS_INCOMPLETE  # Will be updated by evaluate_artifact
 
             # Atomically save artifact progress after every profile
-            current_artifact = evaluate_artifact(current_artifact)
+            current_artifact = evaluate_artifact(current_artifact, min_soak_seconds=self.soak_duration_seconds)
             self._save_artifact_atomically(current_artifact)
 
         # Final evaluation and persistence
-        final_evaluated = evaluate_artifact(current_artifact)
+        final_evaluated = evaluate_artifact(current_artifact, min_soak_seconds=self.soak_duration_seconds)
         self._save_artifact_atomically(final_evaluated)
         return final_evaluated
 
@@ -685,9 +712,10 @@ class SequentialBenchmarkRunner:
                     break
 
                 current_vram = self._sample_gpu_vram()
-                if current_vram is not None:
-                    if cold_peak_vram is None or current_vram > cold_peak_vram:
-                        cold_peak_vram = current_vram
+                if current_vram is not None and (
+                    cold_peak_vram is None or current_vram > cold_peak_vram
+                ):
+                    cold_peak_vram = current_vram
 
                 # Check HTTP readiness
                 if self._check_http_readiness(plan.port):
@@ -762,7 +790,7 @@ class SequentialBenchmarkRunner:
             eval_notes.append("GPU memory sampler query failed for post-unload residual VRAM.")
 
         # Leak threshold uses total_vram_mb matching evaluator
-        max_allowed_unload_vram = max(100.0, 0.02 * total_vram_mb) if total_vram_mb > 0 else 100.0
+        max_allowed_unload_vram = max_allowed_unload_vram_mb(total_vram_mb)
         if post_unload_residual is not None:
             has_memory_leak = post_unload_residual > max_allowed_unload_vram
         else:
@@ -881,7 +909,7 @@ class SequentialBenchmarkRunner:
         try:
             req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
             with urllib.request.urlopen(req, timeout=5.0) as resp:
-                return resp.status == 200
+                return bool(resp.status == 200)
         except Exception:
             return False
 
@@ -894,9 +922,11 @@ class SequentialBenchmarkRunner:
         if self.http_client_factory:
             client = self.http_client_factory(port)
             if hasattr(client, "run_streaming_benchmark"):
-                return client.run_streaming_benchmark(
+                streamed: tuple[float | None, float | None, float | None, float | None]
+                streamed = client.run_streaming_benchmark(
                     iterations=self.num_iterations, warmup=self.num_warmup
                 )
+                return streamed
 
         import urllib.request
 
@@ -918,8 +948,8 @@ class SequentialBenchmarkRunner:
                 req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
                 with urllib.request.urlopen(req, timeout=10.0) as resp:
                     _ = resp.read()
-            except Exception:
-                pass
+            except Exception as err:
+                logger.warning("Benchmark warmup request failed: %s", err)
 
         ttfts: list[float] = []
         decode_speeds: list[float] = []
@@ -948,8 +978,8 @@ class SequentialBenchmarkRunner:
                 if ttft_ms is not None and p_tokens is not None:
                     ttft_sec = max(0.000001, ttft_ms / 1000.0)
                     prompt_speeds.append(p_tokens / ttft_sec)
-            except Exception:
-                pass
+            except Exception as err:
+                logger.warning("Benchmark measurement request failed: %s", err)
 
         if not ttfts or not prompt_speeds:
             return None, None, None, None
@@ -961,36 +991,77 @@ class SequentialBenchmarkRunner:
 
         return ttft_p50, ttft_p95, avg_decode, avg_prompt
 
+    def _use_process_group(self, proc: Any) -> bool:
+        return (
+            self._owns_process_group
+            and os.name == "posix"
+            and isinstance(getattr(proc, "pid", None), int)
+        )
+
+    @staticmethod
+    def _killpg(pid: int, sig: int) -> bool:
+        """Signal a whole process group. Returns False once the group no longer exists."""
+        try:
+            os.killpg(pid, sig)
+            return True
+        except ProcessLookupError:
+            return False
+        except OSError as err:
+            logger.warning("killpg(%s, %s) failed: %s", pid, sig, err)
+            return False
+
+    def _signal_process(self, proc: Any, sig: int, method: str) -> None:
+        if self._use_process_group(proc):
+            self._killpg(proc.pid, sig)
+            return
+        fn = getattr(proc, method, None)
+        if fn:
+            fn()
+
     def _safely_teardown_process(self, proc: Any) -> None:
-        """Gracefully terminate child process, wait bounded duration, then kill exact child."""
+        """Terminate the server and everything it spawned.
+
+        SIGTERM the process group (Windows: terminate), wait ``shutdown_timeout_seconds``,
+        then SIGKILL the group. Group members that outlive the leader are killed too, so no
+        EngineCore/worker process keeps holding VRAM.
+        """
+        group = self._use_process_group(proc)
         try:
             poll_fn = getattr(proc, "poll", lambda: None)
             if poll_fn() is not None:
+                if group:
+                    self._killpg(proc.pid, signal.SIGKILL)  # stragglers of an exited leader
                 return
 
-            term_fn = getattr(proc, "terminate", None)
-            if term_fn:
-                term_fn()
+            self._signal_process(proc, signal.SIGTERM if os.name == "posix" else 0, "terminate")
 
             wait_fn = getattr(proc, "wait", None)
             if wait_fn:
                 try:
                     wait_fn(timeout=self.shutdown_timeout_seconds)
+                    if group:
+                        deadline = time.monotonic() + min(5.0, self.shutdown_timeout_seconds)
+                        while time.monotonic() < deadline and self._killpg(proc.pid, 0):
+                            time.sleep(0.1)
+                        self._killpg(proc.pid, signal.SIGKILL)
                     return
-                except (subprocess.TimeoutExpired, Exception):
-                    pass
+                except subprocess.TimeoutExpired:
+                    logger.warning(
+                        "Server did not exit within %.0fs of SIGTERM; killing.",
+                        self.shutdown_timeout_seconds,
+                    )
+                except Exception as err:
+                    logger.warning("Error waiting for server shutdown: %s", err)
 
-            kill_fn = getattr(proc, "kill", None)
-            if kill_fn:
-                kill_fn()
+            self._signal_process(proc, signal.SIGKILL if os.name == "posix" else 0, "kill")
 
             if wait_fn:
                 try:
                     wait_fn(timeout=5.0)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception as err:
+                    logger.warning("Server did not exit after kill: %s", err)
+        except Exception as err:
+            logger.warning("Server teardown failed: %s", err)
 
     def _save_artifact_atomically(self, artifact: TurboQuantBenchmarkArtifact) -> None:
         """Atomically persist benchmark artifact to disk."""

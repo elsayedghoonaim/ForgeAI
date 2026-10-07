@@ -28,6 +28,41 @@ class QuantizationType(str, Enum):
     AUTO = "auto"
 
 
+# Single source of truth for KV-cache dtypes accepted by runtime config, manifests
+# and saved profiles. ``turboquant_3bit_nc`` is a POC-only profile and is rejected.
+RUNTIME_KV_CACHE_DTYPES: tuple[str, ...] = ("auto", "fp8", "turboquant_k8v4", "turboquant_4bit_nc")
+POC_ONLY_KV_CACHE_DTYPES: frozenset[str] = frozenset({"turboquant_3bit_nc"})
+
+
+def normalize_kv_cache_dtype(value: Any) -> str:
+    """Normalize and validate a runtime KV-cache dtype (raises ValueError if unsupported)."""
+    val = value.lower().strip() if isinstance(value, str) else ""
+    if val in POC_ONLY_KV_CACHE_DTYPES:
+        raise ValueError(
+            f"{val} is an aggressive POC-only profile and is not accepted in normal runtime config."
+        )
+    if val not in RUNTIME_KV_CACHE_DTYPES:
+        raise ValueError(
+            f"Invalid kv_cache_dtype '{value}'. Must be one of {sorted(RUNTIME_KV_CACHE_DTYPES)}."
+        )
+    return val
+
+
+def is_gguf_reference(model: str | None) -> bool:
+    """Return True if a model path/name/tag refers to a GGUF file."""
+    return bool(model) and ".gguf" in str(model).lower()
+
+
+def reject_gguf(model: str | None) -> None:
+    """Raise ValueError with an actionable message if ``model`` refers to GGUF."""
+    if is_gguf_reference(model):
+        raise ValueError(
+            f"ERROR: GGUF model format is unsupported in ForgeAI v2.0+ (model: {str(model).strip()!r}). "
+            "llama.cpp has been removed in favor of vLLM. "
+            "Remediation: Specify a Hugging Face repo ID or local safetensors directory."
+        )
+
+
 class KVCacheSettings(BaseSettings):
     """vLLM KV-cache quantization configuration settings."""
 
@@ -36,17 +71,7 @@ class KVCacheSettings(BaseSettings):
     @field_validator("dtype", mode="before")
     @classmethod
     def validate_dtype(cls, value: str) -> str:
-        val = value.lower().strip() if isinstance(value, str) else value
-        allowed = {"auto", "fp8", "turboquant_k8v4", "turboquant_4bit_nc"}
-        if val == "turboquant_3bit_nc":
-            raise ValueError(
-                "turboquant_3bit_nc is an aggressive POC-only profile and is not accepted in normal runtime config."
-            )
-        if val not in allowed:
-            raise ValueError(
-                f"Invalid kv_cache_dtype '{value}'. Must be one of {sorted(allowed)}."
-            )
-        return val
+        return normalize_kv_cache_dtype(value)
 
 
 class DevToolSettings(BaseSettings):
@@ -105,7 +130,7 @@ class DevToolSettings(BaseSettings):
     kv_cache_dtype: str = Field(default="auto", description="KV cache quantization format")
 
     # --- Server ---
-    host: str = Field(default="0.0.0.0", description="API server host")
+    host: str = Field(default="127.0.0.1", description="API server host")
     port: int = Field(default=8000, ge=1, le=65535, description="API server port")
     request_id_header: str = Field(default="X-Request-ID", description="Request ID header name")
     log_json: bool = Field(default=False, description="Emit JSON logs instead of Rich logs")
@@ -157,8 +182,8 @@ class DevToolSettings(BaseSettings):
     # --- Auth ---
     auth_enabled: bool = Field(default=False, description="Enable API authentication")
     auth_secret_key: str = Field(
-        default="change-me-in-production",
-        description="JWT signing secret",
+        default="",
+        description="JWT signing secret (>= 32 bytes, required when auth is enabled)",
     )
     auth_algorithm: str = Field(default="HS256", description="JWT algorithm")
     auth_token_expire_minutes: int = Field(default=60, description="Token expiration in minutes")
@@ -168,6 +193,22 @@ class DevToolSettings(BaseSettings):
     )
     bootstrap_api_key_name: str = Field(default="bootstrap", description="Bootstrap API key label")
     bootstrap_api_key_role: str = Field(default="admin", description="Bootstrap API key role")
+
+    docs_enabled: bool | None = Field(
+        default=None,
+        description="Serve /docs, /redoc and /openapi.json (default: only when auth is disabled)",
+    )
+    cors_allow_origins: list[str] = Field(
+        default_factory=list,
+        description="Allowed CORS origins (empty disables CORS)",
+    )
+
+    @field_validator("auth_algorithm")
+    @classmethod
+    def validate_auth_algorithm_field(cls, value: str) -> str:
+        from forgeai.security.auth import validate_auth_algorithm
+
+        return validate_auth_algorithm(value)
 
     @field_validator("model_name", mode="before")
     @classmethod
@@ -183,17 +224,7 @@ class DevToolSettings(BaseSettings):
     @field_validator("kv_cache_dtype", mode="before")
     @classmethod
     def validate_kv_cache_dtype(cls, value: str) -> str:
-        val = value.lower().strip() if isinstance(value, str) else value
-        allowed = {"auto", "fp8", "turboquant_k8v4", "turboquant_4bit_nc"}
-        if val == "turboquant_3bit_nc":
-            raise ValueError(
-                "turboquant_3bit_nc is an aggressive POC-only profile and is not accepted in normal runtime config."
-            )
-        if val not in allowed:
-            raise ValueError(
-                f"Invalid kv_cache_dtype '{value}'. Must be one of {sorted(allowed)}."
-            )
-        return val
+        return normalize_kv_cache_dtype(value)
 
     @model_validator(mode="before")
     @classmethod
@@ -203,15 +234,15 @@ class DevToolSettings(BaseSettings):
             return values
 
         legacy_fields = {"n_gpu_layers", "n_ctx", "n_batch", "chat_format"}
-        lowered_keys = {str(k).lower(): k for k in values.keys()}
+        lowered_keys = {str(k).lower(): k for k in values}
         detected_legacy = [lowered_keys[k] for k in legacy_fields if k in lowered_keys]
 
         backend_val = values.get("backend")
         backend_str = ""
         if isinstance(backend_val, str):
             backend_str = backend_val.lower().strip()
-        elif hasattr(backend_val, "value"):
-            backend_str = str(backend_val.value).lower().strip()
+        elif (backend_enum_val := getattr(backend_val, "value", None)) is not None:
+            backend_str = str(backend_enum_val).lower().strip()
 
         is_legacy_backend = bool(backend_str) and backend_str != "vllm"
 
@@ -219,8 +250,8 @@ class DevToolSettings(BaseSettings):
         quant_str = ""
         if isinstance(quant_val, str):
             quant_str = quant_val.lower().strip()
-        elif hasattr(quant_val, "value"):
-            quant_str = str(quant_val.value).lower().strip()
+        elif (quant_enum_val := getattr(quant_val, "value", None)) is not None:
+            quant_str = str(quant_enum_val).lower().strip()
 
         is_legacy_quant = quant_str == "gguf"
 
@@ -249,12 +280,7 @@ class DevToolSettings(BaseSettings):
     def validate_runtime_scope(self) -> DevToolSettings:
         """Validate backend consistency and concurrency constraints."""
         model_str = (self.model_path or self.model_name).strip()
-        if model_str and (".gguf" in model_str.lower() or model_str.lower().endswith(".gguf")):
-            raise ValueError(
-                f"ERROR: GGUF model format is unsupported in ForgeAI v2.0+ (model: {model_str!r}). "
-                "llama.cpp has been removed in favor of vLLM. "
-                "Remediation: Specify a Hugging Face repo ID or local safetensors directory."
-            )
+        reject_gguf(model_str)
         if self.load_concurrency > self.max_loaded_models:
             raise ValueError(
                 f"load_concurrency ({self.load_concurrency}) cannot exceed max_loaded_models ({self.max_loaded_models})."

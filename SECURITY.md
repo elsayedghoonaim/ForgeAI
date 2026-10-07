@@ -90,12 +90,36 @@ These are deliberate architecture boundaries and operational limits:
 
 For production-like use:
 
-- Set a strong `FORGEAI_AUTH_SECRET_KEY` and `FORGEAI_BOOTSTRAP_API_KEY`.
+- Set a strong `FORGEAI_AUTH_SECRET_KEY` (at least 32 bytes, e.g. `openssl rand -hex 32`; placeholders such as `change-me` are rejected) and `FORGEAI_BOOTSTRAP_API_KEY`. Only HS256/HS384/HS512 are accepted for `FORGEAI_AUTH_ALGORITHM`.
 - Provide an immutable base image reference by RepoDigest (e.g. `vllm/vllm-openai@sha256:...`).
 - Enable authentication for network-exposed endpoints.
 - Restrict network access in front of default port `11434`.
 - Run `forgeai doctor --full` as part of environment validation.
 - Review audit and request logs regularly.
+
+## Authentication and Network Exposure
+
+- `forgeai serve` refuses to start on a non-loopback host (anything other than `127.0.0.0/8`, `::1`, `localhost`) when auth is disabled. Override only with `--insecure-no-auth` or `FORGEAI_INSECURE_NO_AUTH=true`.
+- The Docker image, `docker-compose.yml` and `k8s/deployment.yaml` set `FORGEAI_AUTH_ENABLED=true`. Compose reads the secret and bootstrap key from your environment; Kubernetes reads them from the `forgeai-auth` Secret (`secret-key`, `bootstrap-api-key`) via `secretKeyRef`:
+  `kubectl create secret generic forgeai-auth --from-literal=secret-key="$(openssl rand -hex 32)" --from-literal=bootstrap-api-key="$(openssl rand -hex 24)"`
+- `/docs`, `/redoc` and `/openapi.json` are disabled when auth is enabled unless `FORGEAI_DOCS_ENABLED=true`.
+- JWT permissions are always derived from the role; tokens for revoked or unknown keys are rejected.
+- Rate limiting is per client IP (before auth, including failed attempts) and per actor (after auth). Behind a reverse proxy, apply limits at the proxy as well; `X-Forwarded-For` is not trusted.
+- CORS is off by default; set `FORGEAI_CORS_ALLOW_ORIGINS='["https://app.example"]'` to allow origins.
+- The container runs as uid 10001 with a read-only root filesystem in Kubernetes; all state lives under `/data`.
+- Audit events are written by a background thread; denied-auth events are limited to 10 per minute per client IP. The hash chain continues across daily files.
+
+## Vulnerability Scan Ignores
+
+CI (`.github/workflows/security.yml`) fails on findings. Documented exceptions:
+
+| Tool | ID | Reason |
+|------|----|--------|
+| pip-audit | `CVE-2025-69872` | Accepted upstream/transitive advisory; re-evaluate when a fixed release exists |
+| pip-audit | `PYSEC-2026-161` | Accepted upstream/transitive advisory; re-evaluate when a fixed release exists |
+| safety | `86338`, `73285` | Accepted advisories; re-evaluate when a fixed release exists |
+
+A Trivy filesystem/config scan also runs on every push and pull request.
 
 ## Related Documentation
 

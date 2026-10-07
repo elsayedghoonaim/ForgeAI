@@ -8,15 +8,17 @@ parallelism into a zero-config experience.
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 import platform
 from dataclasses import dataclass, field
+from typing import Any
 
 from rich.console import Console
-from rich.table import Table
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 DEFAULT_GPU_MEMORY_UTILIZATION = 0.90
 GPU_MEMORY_STARTUP_RESERVE_MB = 128.0
@@ -78,10 +80,12 @@ def detect_gpus() -> GPUTopology:
     """
     topology = GPUTopology()
 
+    nvml: Any = None
     try:
         import pynvml
 
         pynvml.nvmlInit()
+        nvml = pynvml
         topology.driver_version = pynvml.nvmlSystemGetDriverVersion()
 
         device_count = pynvml.nvmlDeviceGetCount()
@@ -164,12 +168,17 @@ def detect_gpus() -> GPUTopology:
         # Calculate recommended tensor parallel size
         topology.recommended_tp_size = _calculate_tp_size(topology)
 
-        pynvml.nvmlShutdown()
-
     except ImportError:
         console.print("[dim]nvidia-ml-py not installed — GPU detection unavailable[/dim]")
     except Exception as e:
         console.print(f"[yellow]⚠ GPU detection failed: {e}[/yellow]")
+    finally:
+        # Always release NVML, even when a query above raised.
+        if nvml is not None:
+            try:
+                nvml.nvmlShutdown()
+            except Exception as err:
+                logger.debug("nvmlShutdown failed: %s", err)
 
     return topology
 
@@ -286,6 +295,7 @@ def _calculate_tp_size(topology: GPUTopology) -> int:
 
 def print_gpu_table(topology: GPUTopology) -> None:
     """Display GPU topology as a Rich table."""
+    from rich.table import Table
     if not topology.gpus:
         console.print("[yellow]No GPUs detected.[/yellow]")
         return

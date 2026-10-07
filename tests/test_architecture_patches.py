@@ -1,15 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 import unittest
 from inspect import iscoroutinefunction
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 # Ensure the src folder is on Python path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
 from forgeai.cli.runtime import (
     recommend_chat_max_model_len,
     recommend_chat_max_num_seqs,
@@ -92,8 +88,8 @@ class ArchitecturePatchesTests(unittest.TestCase):
         ):
             backend.shutdown()
 
-        # Check Ray was shut down
-        mock_ray.shutdown.assert_called_once()
+        # Ray is process-global: a single backend must never shut it down
+        mock_ray.shutdown.assert_not_called()
         # Check PyTorch CUDA cache emptied
         mock_torch.cuda.empty_cache.assert_called_once()
         # Check engine is set to None and is_running is False

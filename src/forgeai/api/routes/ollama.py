@@ -6,8 +6,8 @@ import asyncio
 import json
 import math
 import time
-from contextlib import suppress
-from datetime import datetime, timedelta, timezone
+from contextlib import aclosing, suppress
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -23,15 +23,19 @@ from forgeai.api.schemas.ollama import (
     OllamaOptions,
     OllamaPullRequest,
     OllamaShowRequest,
+    OllamaUnloadRequest,
 )
+from forgeai.api.streaming import guarded_stream_response
+from forgeai.core.backends.base import StreamStats, abort_request, iter_stream
 from forgeai.core.engine import is_oom_exception
+from forgeai.models.loader import SecureCacheManager, SecurityBlockError
 from forgeai.models.manifest import ForgeAIManifest, validate_repo_id_string
 
 router = APIRouter()
 
 
 def _iso_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _get_runtime_adapter(request: Request) -> Any:
@@ -67,14 +71,105 @@ def _parse_options(options_raw: Any) -> tuple[float, float, int, int, list[str] 
     return temp, top_p, top_k, max_tokens, stop
 
 
+def _ndjson_stream_response(
+    runtime: Any,
+    key: Any,
+    engine: Any,
+    prompt: str,
+    *,
+    keep_alive: Any,
+    params: dict[str, Any],
+    make_chunk: Any,
+    make_terminal: Any,
+    acquire_start: float,
+) -> StreamingResponse:
+    """NDJSON streaming response with guaranteed lease release, close and abort."""
+    stats = StreamStats()
+
+    async def _events() -> Any:
+        eval_start = time.perf_counter()
+        source = iter_stream(engine, prompt, stats, **params)
+        async with aclosing(source) as chunks:  # type: ignore[type-var]
+            async for chunk in chunks:
+                yield json.dumps(make_chunk(chunk)) + "\n"
+        now = time.perf_counter()
+        total_duration_ns = int((now - acquire_start) * 1e9)
+        eval_duration_ns = int((now - eval_start) * 1e9)
+        yield json.dumps(make_terminal(stats, total_duration_ns, eval_duration_ns)) + "\n"
+
+    async def _on_error(err: Exception) -> list[str]:
+        if is_oom_exception(err):
+            with suppress(Exception):
+                await runtime.engine_manager.mark_engine_failed(key, str(err))
+        return [json.dumps({"error": str(err)}) + "\n"]
+
+    return guarded_stream_response(
+        _events(),
+        release=lambda: runtime.release_lease(key, keep_alive=keep_alive),
+        abort=lambda: abort_request(engine, stats.request_id),
+        on_error=_on_error,
+        media_type="application/x-ndjson",
+    )
+
+
 def _is_zero_keep_alive(val: Any) -> bool:
     if val is None:
         return False
     if isinstance(val, (int, float)) and val == 0:
         return True
-    if isinstance(val, str) and val.strip().lower() in ("0", "0.0", "0s", "0m", "0h"):
-        return True
-    return False
+    return bool(isinstance(val, str) and val.strip().lower() in ("0", "0.0", "0s", "0m", "0h"))
+
+
+def _model_error(model: str, err: Exception) -> JSONResponse:
+    """Map lease/resolution errors: unknown model -> 404, malformed tag -> 400."""
+    if isinstance(err, KeyError):
+        return JSONResponse(status_code=404, content={"error": f"model '{model}' not found"})
+    return JSONResponse(status_code=400, content={"error": str(err)})
+
+
+def _count_tokens(engine: Any, texts: list[str]) -> int:
+    """Token count for ``texts`` using the engine's tokenizer when one is reachable.
+
+    Falls back to a whitespace word count (a documented underestimate) when the engine
+    exposes no tokenizer or tokenization fails.
+    """
+    counter = getattr(engine, "count_tokens", None)
+    if callable(counter):
+        with suppress(Exception):
+            return int(sum(counter(t) for t in texts))
+    for holder in (engine, getattr(engine, "backend", None), getattr(engine, "_backend", None)):
+        tok = getattr(holder, "_tokenizer", None) or getattr(holder, "tokenizer", None)
+        encode = getattr(tok, "encode", None)
+        if callable(encode):
+            with suppress(Exception):
+                return sum(len(encode(t)) for t in texts)
+    return sum(len(t.split()) for t in texts)
+
+
+async def _unload_model(runtime: Any, model: str) -> tuple[bool, JSONResponse | None]:
+    """Unload ``model`` without ever loading it. Returns (was_loaded, error_response)."""
+    try:
+        key, _manifest, _record = await asyncio.to_thread(runtime.get_engine_key_for_tag, model)
+    except (KeyError, ValueError) as err:
+        return False, _model_error(model, err)
+    statuses = await runtime.engine_manager.list_async()
+    was_loaded = any(st.key == key for st in statuses)
+    await runtime.engine_manager.stop(key)
+    return was_loaded, None
+
+
+@router.post("/unload")
+async def unload(request: Request, body: OllamaUnloadRequest) -> Response:
+    """Unload a running model engine. Reports whether it was actually loaded."""
+    runtime = _get_runtime_adapter(request)
+    try:
+        model = body.model_name
+    except ValueError as err:
+        return JSONResponse(status_code=400, content={"error": str(err)})
+    was_loaded, error = await _unload_model(runtime, model)
+    if error is not None:
+        return error
+    return JSONResponse(content={"model": model, "unloaded": was_loaded})
 
 
 @router.post("/generate")
@@ -82,21 +177,12 @@ async def generate(request: Request, body: OllamaGenerateRequest) -> Response:
     """Ollama-compatible /api/generate endpoint."""
     runtime = _get_runtime_adapter(request)
 
-    # Resource-safe stop control shape: empty prompt, stream=False, keep_alive=0
-    is_stop_shape = (
-        (not body.prompt or body.prompt == "")
-        and body.stream is False
-        and _is_zero_keep_alive(body.keep_alive)
-    )
-    if is_stop_shape:
-        try:
-            key, manifest, record = runtime.get_engine_key_for_tag(body.model)
-        except (KeyError, ValueError):
-            return JSONResponse(
-                status_code=404,
-                content={"error": f"model '{body.model}' not found"},
-            )
-        await runtime.engine_manager.stop(key)
+    # keep_alive=0 with an empty prompt is an unload request, whatever ``stream`` says;
+    # it must never load the model.
+    if not body.prompt and _is_zero_keep_alive(body.keep_alive):
+        _, error = await _unload_model(runtime, body.model)
+        if error is not None:
+            return error
         return JSONResponse(
             content={
                 "model": body.model,
@@ -138,11 +224,8 @@ async def generate(request: Request, body: OllamaGenerateRequest) -> Response:
         lease, manifest, record, key = await runtime.acquire_lease(
             body.model, keep_alive=body.keep_alive
         )
-    except KeyError:
-        return JSONResponse(
-            status_code=404,
-            content={"error": f"model '{body.model}' not found"},
-        )
+    except (KeyError, ValueError) as err:
+        return _model_error(body.model, err)
 
     acquired = True
     try:
@@ -162,67 +245,49 @@ async def generate(request: Request, body: OllamaGenerateRequest) -> Response:
         temp, top_p, top_k, max_tokens, stop = _parse_options(body.options)
 
         if body.stream:
-            acquired = False  # Ownership transferred to generator finally
-            async def _stream_gen():
-                eval_start = time.perf_counter()
-                eval_count = 0
-                error_emitted = False
-                try:
-                    async for chunk in lease.engine.generate_stream(
-                        prompt=prompt,
-                        max_tokens=max_tokens,
-                        temperature=temp,
-                        top_p=top_p,
-                        stop=stop,
-                        top_k=top_k,
-                    ):
-                        eval_count += 1
-                        payload = {
-                            "model": body.model,
-                            "created_at": _iso_now(),
-                            "response": chunk,
-                            "done": False,
-                        }
-                        yield json.dumps(payload) + "\n"
+            def _chunk(text: str) -> dict[str, Any]:
+                return {
+                    "model": body.model,
+                    "created_at": _iso_now(),
+                    "response": text,
+                    "done": False,
+                }
 
-                    total_duration_ns = int((time.perf_counter() - acquire_start) * 1e9)
-                    eval_duration_ns = int((time.perf_counter() - eval_start) * 1e9)
+            def _terminal(stats: StreamStats, total_ns: int, eval_ns: int) -> dict[str, Any]:
+                return {
+                    "model": body.model,
+                    "created_at": _iso_now(),
+                    "response": "",
+                    "done": True,
+                    "done_reason": stats.finish_reason or "stop",
+                    "context": body.context or [],
+                    "total_duration": total_ns,
+                    "load_duration": load_duration_ns,
+                    "prompt_eval_count": stats.prompt_tokens,
+                    "prompt_eval_duration": max(0, total_ns - eval_ns),
+                    "eval_count": stats.completion_tokens,
+                    "eval_duration": eval_ns,
+                }
 
-                    last_res = getattr(lease.engine, "last_result", None)
-                    prompt_tokens = getattr(last_res, "prompt_tokens", 0) if last_res else 0
-                    completion_tokens = (
-                        getattr(last_res, "completion_tokens", eval_count)
-                        if last_res
-                        else eval_count
-                    )
-
-                    terminal = {
-                        "model": body.model,
-                        "created_at": _iso_now(),
-                        "response": "",
-                        "done": True,
-                        "done_reason": "stop",
-                        "context": body.context or [],
-                        "total_duration": total_duration_ns,
-                        "load_duration": load_duration_ns,
-                        "prompt_eval_count": prompt_tokens,
-                        "prompt_eval_duration": max(0, total_duration_ns - eval_duration_ns),
-                        "eval_count": completion_tokens,
-                        "eval_duration": eval_duration_ns,
-                    }
-                    yield json.dumps(terminal) + "\n"
-
-                except Exception as err:
-                    if not error_emitted:
-                        error_emitted = True
-                        if is_oom_exception(err):
-                            with suppress(Exception):
-                                await runtime.engine_manager.mark_engine_failed(key, str(err))
-                        yield json.dumps({"error": str(err)}) + "\n"
-                finally:
-                    await runtime.release_lease(key, keep_alive=body.keep_alive)
-
-            return StreamingResponse(_stream_gen(), media_type="application/x-ndjson")
+            response = _ndjson_stream_response(
+                runtime,
+                key,
+                lease.engine,
+                prompt,
+                keep_alive=body.keep_alive,
+                params={
+                    "max_tokens": max_tokens,
+                    "temperature": temp,
+                    "top_p": top_p,
+                    "stop": stop,
+                    "top_k": top_k,
+                },
+                make_chunk=_chunk,
+                make_terminal=_terminal,
+                acquire_start=acquire_start,
+            )
+            acquired = False  # Ownership transferred to the guarded response
+            return response
 
         gen_start = time.perf_counter()
         result = await lease.engine.generate(
@@ -262,6 +327,20 @@ async def chat(request: Request, body: OllamaChatRequest) -> Response:
     """Ollama-compatible /api/chat endpoint."""
     runtime = _get_runtime_adapter(request)
 
+    if not body.messages and _is_zero_keep_alive(body.keep_alive):
+        _, error = await _unload_model(runtime, body.model)
+        if error is not None:
+            return error
+        return JSONResponse(
+            content={
+                "model": body.model,
+                "created_at": _iso_now(),
+                "message": {"role": "assistant", "content": ""},
+                "done": True,
+                "done_reason": "stop",
+            }
+        )
+
     for msg in body.messages:
         if msg.images and len(msg.images) > 0:
             return JSONResponse(
@@ -275,11 +354,8 @@ async def chat(request: Request, body: OllamaChatRequest) -> Response:
         lease, manifest, record, key = await runtime.acquire_lease(
             body.model, keep_alive=body.keep_alive
         )
-    except KeyError:
-        return JSONResponse(
-            status_code=404,
-            content={"error": f"model '{body.model}' not found"},
-        )
+    except (KeyError, ValueError) as err:
+        return _model_error(body.model, err)
 
     acquired = True
     try:
@@ -295,66 +371,48 @@ async def chat(request: Request, body: OllamaChatRequest) -> Response:
         temp, top_p, top_k, max_tokens, stop = _parse_options(body.options)
 
         if body.stream:
-            acquired = False  # Ownership transferred to generator finally
-            async def _stream_chat():
-                eval_start = time.perf_counter()
-                eval_count = 0
-                error_emitted = False
-                try:
-                    async for chunk in lease.engine.generate_stream(
-                        prompt=prompt,
-                        max_tokens=max_tokens,
-                        temperature=temp,
-                        top_p=top_p,
-                        stop=stop,
-                        top_k=top_k,
-                    ):
-                        eval_count += 1
-                        payload = {
-                            "model": body.model,
-                            "created_at": _iso_now(),
-                            "message": {"role": "assistant", "content": chunk},
-                            "done": False,
-                        }
-                        yield json.dumps(payload) + "\n"
+            def _chat_chunk(text: str) -> dict[str, Any]:
+                return {
+                    "model": body.model,
+                    "created_at": _iso_now(),
+                    "message": {"role": "assistant", "content": text},
+                    "done": False,
+                }
 
-                    total_duration_ns = int((time.perf_counter() - acquire_start) * 1e9)
-                    eval_duration_ns = int((time.perf_counter() - eval_start) * 1e9)
+            def _chat_terminal(stats: StreamStats, total_ns: int, eval_ns: int) -> dict[str, Any]:
+                return {
+                    "model": body.model,
+                    "created_at": _iso_now(),
+                    "message": {"role": "assistant", "content": ""},
+                    "done": True,
+                    "done_reason": stats.finish_reason or "stop",
+                    "total_duration": total_ns,
+                    "load_duration": load_duration_ns,
+                    "prompt_eval_count": stats.prompt_tokens,
+                    "prompt_eval_duration": max(0, total_ns - eval_ns),
+                    "eval_count": stats.completion_tokens,
+                    "eval_duration": eval_ns,
+                }
 
-                    last_res = getattr(lease.engine, "last_result", None)
-                    prompt_tokens = getattr(last_res, "prompt_tokens", 0) if last_res else 0
-                    completion_tokens = (
-                        getattr(last_res, "completion_tokens", eval_count)
-                        if last_res
-                        else eval_count
-                    )
-
-                    terminal = {
-                        "model": body.model,
-                        "created_at": _iso_now(),
-                        "message": {"role": "assistant", "content": ""},
-                        "done": True,
-                        "done_reason": "stop",
-                        "total_duration": total_duration_ns,
-                        "load_duration": load_duration_ns,
-                        "prompt_eval_count": prompt_tokens,
-                        "prompt_eval_duration": max(0, total_duration_ns - eval_duration_ns),
-                        "eval_count": completion_tokens,
-                        "eval_duration": eval_duration_ns,
-                    }
-                    yield json.dumps(terminal) + "\n"
-
-                except Exception as err:
-                    if not error_emitted:
-                        error_emitted = True
-                        if is_oom_exception(err):
-                            with suppress(Exception):
-                                await runtime.engine_manager.mark_engine_failed(key, str(err))
-                        yield json.dumps({"error": str(err)}) + "\n"
-                finally:
-                    await runtime.release_lease(key, keep_alive=body.keep_alive)
-
-            return StreamingResponse(_stream_chat(), media_type="application/x-ndjson")
+            response = _ndjson_stream_response(
+                runtime,
+                key,
+                lease.engine,
+                prompt,
+                keep_alive=body.keep_alive,
+                params={
+                    "max_tokens": max_tokens,
+                    "temperature": temp,
+                    "top_p": top_p,
+                    "stop": stop,
+                    "top_k": top_k,
+                },
+                make_chunk=_chat_chunk,
+                make_terminal=_chat_terminal,
+                acquire_start=acquire_start,
+            )
+            acquired = False  # Ownership transferred to the guarded response
+            return response
 
         gen_start = time.perf_counter()
         result = await lease.engine.generate(
@@ -406,12 +464,11 @@ async def embed(request: Request, body: OllamaEmbedRequest) -> Response:
             status_code=400,
             content={"error": "Embedding truncate parameter is unsupported."},
         )
-    if body.options is not None:
-        if isinstance(body.options, dict) and len(body.options) > 0:
-            return JSONResponse(
-                status_code=400,
-                content={"error": "Embedding options parameter is unsupported."},
-            )
+    if body.options is not None and isinstance(body.options, dict) and len(body.options) > 0:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Embedding options parameter is unsupported."},
+        )
 
     acquire_start = time.perf_counter()
     acquired = False
@@ -419,11 +476,8 @@ async def embed(request: Request, body: OllamaEmbedRequest) -> Response:
         lease, manifest, record, key = await runtime.acquire_lease(
             body.model, keep_alive=body.keep_alive
         )
-    except KeyError:
-        return JSONResponse(
-            status_code=404,
-            content={"error": f"model '{body.model}' not found"},
-        )
+    except (KeyError, ValueError) as err:
+        return _model_error(body.model, err)
 
     acquired = True
     try:
@@ -439,12 +493,12 @@ async def embed(request: Request, body: OllamaEmbedRequest) -> Response:
             )
         except Exception as err:
             return JSONResponse(
-                status_code=400,
+                status_code=500,
                 content={"error": f"Embedding generation failed: {err}"},
             )
 
         total_duration_ns = int((time.perf_counter() - acquire_start) * 1e9)
-        prompt_tokens = sum(len(text.split()) for text in input_texts)
+        prompt_tokens = _count_tokens(lease.engine, input_texts)
 
         return JSONResponse(
             content={
@@ -464,12 +518,16 @@ async def embed(request: Request, body: OllamaEmbedRequest) -> Response:
 async def list_tags(request: Request) -> Response:
     """Ollama-compatible /api/tags endpoint."""
     runtime = _get_runtime_adapter(request)
-    records = runtime.model_registry.list_records(cache_manager=runtime.cache_manager)
+    records = await asyncio.to_thread(
+        runtime.model_registry.list_records, cache_manager=runtime.cache_manager, include_size=True
+    )
 
     models_list = []
     for record in records:
         try:
-            manifest = runtime.model_registry.get_manifest(record.ref.full_tag)
+            manifest = record.manifest
+            if manifest is None:
+                raise ValueError("record has no manifest")
             weight_quant = manifest.engine_settings.weight_quantization
             kv_dtype = manifest.kv_cache.dtype
         except Exception:
@@ -478,7 +536,7 @@ async def list_tags(request: Request) -> Response:
 
         try:
             mtime = Path(record.manifest_path).stat().st_mtime
-            modified_at_str = datetime.fromtimestamp(mtime, timezone.utc).isoformat()
+            modified_at_str = datetime.fromtimestamp(mtime, UTC).isoformat()
         except Exception:
             modified_at_str = _iso_now()
 
@@ -511,19 +569,22 @@ async def list_running(request: Request) -> Response:
     statuses = await runtime.engine_manager.list_async()
 
     running_models = []
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for st in statuses:
         ttl = st.remaining_keep_alive_seconds
-        if ttl is None or st.ref_count > 0:
-            expires_at_str = "2100-01-01T00:00:00Z"
-        elif math.isinf(ttl):
+        if ttl is None or st.ref_count > 0 or math.isinf(ttl):
             expires_at_str = "2100-01-01T00:00:00Z"
         else:
             expires_at_str = (now + timedelta(seconds=max(0.0, ttl))).isoformat()
 
         public_tag = runtime.get_public_tag_for_key(st.key)
         try:
-            record = runtime.model_registry.get_record(public_tag, cache_manager=runtime.cache_manager)
+            record = await asyncio.to_thread(
+                runtime.model_registry.get_record,
+                public_tag,
+                cache_manager=runtime.cache_manager,
+                include_size=True,
+            )
             size = record.size_bytes
             digest = record.ref.digest
         except Exception:
@@ -535,7 +596,7 @@ async def list_running(request: Request) -> Response:
                 "name": public_tag,
                 "model": public_tag,
                 "size": size,
-                "size_vram": 0,
+                "size_vram": 0,  # vLLM does not report per-model VRAM; clients treat 0 as unknown
                 "digest": digest,
                 "details": {
                     "format": "safetensors",
@@ -559,7 +620,7 @@ async def show_model(request: Request, body: OllamaShowRequest) -> Response:
     runtime = _get_runtime_adapter(request)
     try:
         model_name = body.model_name
-        manifest, record = runtime.get_manifest_and_record(model_name)
+        manifest, record = await asyncio.to_thread(runtime.get_manifest_and_record, model_name)
     except (ValueError, KeyError):
         return JSONResponse(
             status_code=404,
@@ -626,10 +687,36 @@ async def pull_model(request: Request, body: OllamaPullRequest) -> Response:
 
     # Save existing manifest if present to preserve atomic state on registration failure
     existing_manifest = None
-    try:
-        existing_manifest = runtime.model_registry.get_manifest(public_tag)
-    except Exception:
-        pass
+    with suppress(Exception):
+        existing_manifest = await asyncio.to_thread(
+            runtime.model_registry.get_manifest, public_tag
+        )
+
+    trust_remote_code = bool(
+        body.trust_remote_code
+        or (existing_manifest is not None and existing_manifest.engine_settings.trust_remote_code)
+    )
+
+    async def _download_and_scan() -> str:
+        """Download the snapshot, then scan it; a blocked snapshot is purged and raises."""
+        path = await asyncio.to_thread(
+            runtime.cache_manager.download_snapshot,
+            repo_id=repo_id,
+            revision="main",
+            token=None,
+            trust_remote_code=trust_remote_code,
+        )
+        # SecureCacheManager.download_snapshot already validated and scanned (and purged on
+        # block); any other cache manager still needs the explicit scan here.
+        if not isinstance(runtime.cache_manager, SecureCacheManager):
+            await asyncio.to_thread(runtime.cache_manager.scan_snapshot_or_purge, path, repo_id)
+        return str(path)
+
+    def _new_manifest() -> ForgeAIManifest:
+        manifest = ForgeAIManifest(name=public_tag, model=repo_id, source_kind="huggingface")
+        if trust_remote_code:
+            manifest.engine_settings.trust_remote_code = True
+        return manifest
 
     if body.stream:
         async def _stream_pull():
@@ -637,12 +724,7 @@ async def pull_model(request: Request, body: OllamaPullRequest) -> Response:
             yield json.dumps({"status": "downloading weights"}) + "\n"
 
             try:
-                await asyncio.to_thread(
-                    runtime.cache_manager.download_snapshot,
-                    repo_id=repo_id,
-                    revision="main",
-                    token=None,
-                )
+                await _download_and_scan()
             except Exception as err:
                 yield json.dumps({"error": f"Pull failed: {err}"}) + "\n"
                 return
@@ -651,48 +733,44 @@ async def pull_model(request: Request, body: OllamaPullRequest) -> Response:
 
 
             try:
-                manifest = ForgeAIManifest(
-                    name=public_tag,
-                    model=repo_id,
-                    source_kind="huggingface",
-                )
-                record = runtime.model_registry.register_manifest(
-                    manifest, cache_manager=runtime.cache_manager
+                manifest = _new_manifest()
+                record = await asyncio.to_thread(
+                    runtime.model_registry.register_manifest,
+                    manifest,
+                    cache_manager=runtime.cache_manager,
                 )
                 yield json.dumps({"status": "success", "digest": record.ref.digest}) + "\n"
             except Exception as err:
                 if existing_manifest is not None:
                     with suppress(Exception):
-                        runtime.model_registry.register_manifest(
-                            existing_manifest, cache_manager=runtime.cache_manager
+                        await asyncio.to_thread(
+                            runtime.model_registry.register_manifest,
+                            existing_manifest,
+                            cache_manager=runtime.cache_manager,
                         )
                 yield json.dumps({"error": f"Manifest registration failed: {err}"}) + "\n"
 
         return StreamingResponse(_stream_pull(), media_type="application/x-ndjson")
 
     try:
-        await asyncio.to_thread(
-            runtime.cache_manager.download_snapshot,
-            repo_id=repo_id,
-            revision="main",
-            token=None,
-        )
-        manifest = ForgeAIManifest(
-            name=public_tag,
-            model=repo_id,
-            source_kind="huggingface",
-        )
-        record = runtime.model_registry.register_manifest(
-            manifest, cache_manager=runtime.cache_manager
+        await _download_and_scan()
+        manifest = _new_manifest()
+        record = await asyncio.to_thread(
+            runtime.model_registry.register_manifest,
+            manifest,
+            cache_manager=runtime.cache_manager,
         )
         return JSONResponse(content={"status": "success", "digest": record.ref.digest})
     except Exception as err:
         if existing_manifest is not None:
             with suppress(Exception):
-                runtime.model_registry.register_manifest(
-                    existing_manifest, cache_manager=runtime.cache_manager
+                await asyncio.to_thread(
+                    runtime.model_registry.register_manifest,
+                    existing_manifest,
+                    cache_manager=runtime.cache_manager,
                 )
-        return JSONResponse(status_code=500, content={"error": f"Pull failed: {err}"})
+        status = 403 if isinstance(err, SecurityBlockError) else 500
+        return JSONResponse(status_code=status, content={"error": f"Pull failed: {err}"})
 
 
 @router.delete("/delete")
@@ -701,7 +779,9 @@ async def delete_model(request: Request, body: OllamaDeleteRequest) -> Response:
     runtime = _get_runtime_adapter(request)
     try:
         model_name = body.model_name
-        key, manifest, record = runtime.get_engine_key_for_tag(model_name)
+        key, manifest, record = await asyncio.to_thread(
+            runtime.get_engine_key_for_tag, model_name
+        )
     except (ValueError, KeyError):
         return JSONResponse(
             status_code=404,
@@ -710,7 +790,11 @@ async def delete_model(request: Request, body: OllamaDeleteRequest) -> Response:
 
     # Call stop() with the exact EngineKey built for that record, then unregister after stop completes
     await runtime.engine_manager.stop(key)
-    runtime.model_registry.unregister_tag(record.ref.full_tag, cache_manager=runtime.cache_manager)
+    await asyncio.to_thread(
+        runtime.model_registry.unregister_tag,
+        record.ref.full_tag,
+        cache_manager=runtime.cache_manager,
+    )
 
     return JSONResponse(content={})
 

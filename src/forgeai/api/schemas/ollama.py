@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
@@ -121,6 +122,23 @@ class OllamaPullRequest(BaseModel):
     username: str | None = None
     password: str | None = None
     stream: bool = True
+    trust_remote_code: bool = False
+
+    @property
+    def model_name(self) -> str:
+        res = self.model or self.name or ""
+        if not res.strip():
+            raise ValueError("Model tag is required in 'model' or 'name' field.")
+        return res.strip()
+
+
+class OllamaUnloadRequest(BaseModel):
+    """Request schema for POST /api/unload."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    name: str | None = None
+    model: str | None = None
 
     @property
     def model_name(self) -> str:

@@ -6,18 +6,26 @@ services:
     image: forgeai:2.0.0
     container_name: forgeai-daemon
     restart: unless-stopped
-    ipc: host
+    shm_size: "16gb"
+    user: "10001:10001"
     ports:
       - "11434:11434"
     environment:
       - FORGEAI_HOST=0.0.0.0
       - FORGEAI_PORT=11434
       - FORGEAI_TELEMETRY_ENABLED=false
-      - HF_HOME=/root/.cache/huggingface
-      - FORGEAI_HOME=/root/.forgeai
+      - HF_HOME=/data/huggingface
+      - FORGEAI_HOME=/data/forgeai
+      - FORGEAI_AUTH_ENABLED=true
+      # Required; compose refuses to start if unset. Generate with: openssl rand -hex 32
+      - FORGEAI_AUTH_SECRET_KEY=${FORGEAI_AUTH_SECRET_KEY:?set FORGEAI_AUTH_SECRET_KEY (>=32 bytes)}
+      - FORGEAI_BOOTSTRAP_API_KEY=${FORGEAI_BOOTSTRAP_API_KEY:?set FORGEAI_BOOTSTRAP_API_KEY}
     volumes:
-      - hf-cache:/root/.cache/huggingface
-      - forgeai-cache:/root/.forgeai
+      - forgeai-data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     deploy:
       resources:
         reservations:
@@ -27,7 +35,5 @@ services:
               capabilities: [gpu]
 
 volumes:
-  hf-cache:
-    name: forgeai-hf-cache
-  forgeai-cache:
-    name: forgeai-registry-cache
+  forgeai-data:
+    name: forgeai-data
