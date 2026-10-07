@@ -4,23 +4,62 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import queue
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
+_STOP = object()
+
 
 class AuditLogger:
     """Append-only audit log with hash chaining for tamper detection."""
 
-    def __init__(self, log_dir: str | None = None) -> None:
+    def __init__(self, log_dir: str | None = None, max_queue_size: int = 10000) -> None:
         self.log_dir = Path(
             log_dir or os.path.join(os.path.expanduser("~"), ".forgeai", "audit")
         )
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()
         self._previous_hash = self._load_previous_hash()
+        self.dropped_events = 0
+        self._queue: queue.Queue[Any] = queue.Queue(maxsize=max_queue_size)
+        self._writer = threading.Thread(
+            target=self._writer_loop, name="forgeai-audit-writer", daemon=True
+        )
+        self._writer.start()
+
+    def _writer_loop(self) -> None:
+        while True:
+            item = self._queue.get()
+            try:
+                if item is _STOP:
+                    return
+                path, line = item
+                with open(path, "a", encoding="utf-8") as handle:
+                    handle.write(line)
+            except OSError:
+                logger.exception("audit_write_failed")
+            finally:
+                self._queue.task_done()
+
+    def flush(self) -> None:
+        """Block until all queued events are written to disk."""
+
+        self._queue.join()
+
+    def close(self) -> None:
+        """Flush pending events and stop the writer thread."""
+
+        if self._writer.is_alive():
+            self._queue.put(_STOP)
+            self._writer.join(timeout=10)
 
     def _load_previous_hash(self) -> str:
         latest_files = sorted(self.log_dir.glob("audit_*.jsonl"))
@@ -68,12 +107,16 @@ class AuditLogger:
             entry_str = json.dumps(entry, sort_keys=True)
             entry["hash"] = hashlib.sha256(entry_str.encode()).hexdigest()
             entry_hash = entry["hash"]
-            self._previous_hash = entry_hash if isinstance(entry_hash, str) else "genesis"
 
             log_file = self.log_dir / f"audit_{datetime.now(UTC).strftime('%Y%m%d')}.jsonl"
-            with open(log_file, "a", encoding="utf-8") as handle:
-                handle.write(json.dumps(entry) + "\n")
-
+            try:
+                self._queue.put_nowait((log_file, json.dumps(entry) + "\n"))
+            except queue.Full:
+                # Do not advance the chain for an event that was never written.
+                self.dropped_events += 1
+                logger.error("audit_queue_full_event_dropped")
+                return entry
+            self._previous_hash = entry_hash if isinstance(entry_hash, str) else "genesis"
             return entry
 
     def verify_chain(self, log_file: str) -> tuple[bool, int]:
@@ -83,11 +126,13 @@ class AuditLogger:
         if not path.exists():
             return True, 0
 
-        prev_hash = "genesis"
+        prev_hash = self._hash_before(path)
         count = 0
 
         with open(path, encoding="utf-8") as handle:
             for line in handle:
+                if not line.strip():
+                    continue
                 entry = self._parse_entry(line.strip())
 
                 # 1. Verify continuity of the cryptographic chain
@@ -110,6 +155,27 @@ class AuditLogger:
 
         return True, count
 
+
+    def _hash_before(self, path: Path) -> str:
+        """Return the chain hash that must precede the first entry of ``path``.
+
+        The writer carries the previous hash across daily files, so the verifier
+        starts from the last hash of the preceding file in the same directory.
+        """
+
+        siblings = sorted(path.parent.glob("audit_*.jsonl"))
+        earlier = [p for p in siblings if p.name < path.name]
+        for candidate in reversed(earlier):
+            last = ""
+            with open(candidate, encoding="utf-8") as handle:
+                for line in handle:
+                    if line.strip():
+                        last = line.strip()
+            if last:
+                value = self._parse_entry(last).get("hash")
+                if isinstance(value, str):
+                    return value
+        return "genesis"
 
     def query(
         self,

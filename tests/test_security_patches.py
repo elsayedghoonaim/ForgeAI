@@ -329,6 +329,7 @@ class AuditLoggerVerifyChainTests(unittest.TestCase):
         logger.log("access", "admin", "POST", "/v1/chat/completions", outcome="success")
         logger.log("access", "admin", "GET", "/metrics", outcome="success")
 
+        logger.flush()
         log_files = sorted(self.log_dir.glob("audit_*.jsonl"))
         self.assertEqual(len(log_files), 1)
         log_file = log_files[0]

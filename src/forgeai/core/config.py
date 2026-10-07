@@ -105,7 +105,7 @@ class DevToolSettings(BaseSettings):
     kv_cache_dtype: str = Field(default="auto", description="KV cache quantization format")
 
     # --- Server ---
-    host: str = Field(default="0.0.0.0", description="API server host")
+    host: str = Field(default="127.0.0.1", description="API server host")
     port: int = Field(default=8000, ge=1, le=65535, description="API server port")
     request_id_header: str = Field(default="X-Request-ID", description="Request ID header name")
     log_json: bool = Field(default=False, description="Emit JSON logs instead of Rich logs")
@@ -157,8 +157,8 @@ class DevToolSettings(BaseSettings):
     # --- Auth ---
     auth_enabled: bool = Field(default=False, description="Enable API authentication")
     auth_secret_key: str = Field(
-        default="change-me-in-production",
-        description="JWT signing secret",
+        default="",
+        description="JWT signing secret (>= 32 bytes, required when auth is enabled)",
     )
     auth_algorithm: str = Field(default="HS256", description="JWT algorithm")
     auth_token_expire_minutes: int = Field(default=60, description="Token expiration in minutes")
@@ -168,6 +168,22 @@ class DevToolSettings(BaseSettings):
     )
     bootstrap_api_key_name: str = Field(default="bootstrap", description="Bootstrap API key label")
     bootstrap_api_key_role: str = Field(default="admin", description="Bootstrap API key role")
+
+    docs_enabled: bool | None = Field(
+        default=None,
+        description="Serve /docs, /redoc and /openapi.json (default: only when auth is disabled)",
+    )
+    cors_allow_origins: list[str] = Field(
+        default_factory=list,
+        description="Allowed CORS origins (empty disables CORS)",
+    )
+
+    @field_validator("auth_algorithm")
+    @classmethod
+    def validate_auth_algorithm_field(cls, value: str) -> str:
+        from forgeai.security.auth import validate_auth_algorithm
+
+        return validate_auth_algorithm(value)
 
     @field_validator("model_name", mode="before")
     @classmethod

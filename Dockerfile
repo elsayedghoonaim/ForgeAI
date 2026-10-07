@@ -12,8 +12,19 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     FORGEAI_TELEMETRY_ENABLED=false \
-    HF_HOME=/root/.cache/huggingface \
-    FORGEAI_HOME=/root/.forgeai
+    HOME=/data \
+    HF_HOME=/data/huggingface \
+    FORGEAI_HOME=/data/forgeai \
+    XDG_CACHE_HOME=/data/.cache \
+    FORGEAI_AUTH_ENABLED=true
+# Auth is on by default. Provide FORGEAI_AUTH_SECRET_KEY (>= 32 bytes) and
+# FORGEAI_BOOTSTRAP_API_KEY at runtime (env or orchestrator secret), or the server refuses to start.
+
+# Run as an unprivileged user; all writable state lives under /data.
+RUN groupadd --gid 10001 forgeai \
+    && useradd --uid 10001 --gid 10001 --home-dir /data --no-create-home --shell /usr/sbin/nologin forgeai \
+    && mkdir -p /data/huggingface /data/forgeai /data/.cache \
+    && chown -R 10001:10001 /data
 
 WORKDIR /workspace
 
@@ -24,10 +35,13 @@ COPY src/ src/
 # Install ForgeAI base package and non-vLLM runtime dependencies (vllm==0.22.1 is pre-installed in upstream base)
 RUN pip install --no-build-isolation .
 
+USER 10001:10001
+VOLUME ["/data"]
+
 EXPOSE 11434
 
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
-    CMD python3 -c "import httpx; r = httpx.get('http://localhost:11434/healthz'); assert r.status_code == 200"
+    CMD python3 -c "import httpx; r = httpx.get('http://127.0.0.1:11434/healthz'); assert r.status_code == 200"
 
 ENTRYPOINT ["forgeai", "serve"]
 CMD ["--host", "0.0.0.0", "--port", "11434"]

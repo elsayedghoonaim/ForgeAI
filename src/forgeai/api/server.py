@@ -7,7 +7,6 @@ from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
-from uuid import uuid4
 
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -20,6 +19,7 @@ from forgeai.api.routes import chat, health, models, ollama
 from forgeai.core.engine import EngineManagerError
 from forgeai.monitoring.logging import get_logger
 from forgeai.monitoring.metrics import ACTIVE_REQUESTS, ENGINE_STATUS, record_request
+from forgeai.security.middleware import RateLimitMiddleware, sanitize_request_id
 
 logger = get_logger(__name__)
 
@@ -29,7 +29,7 @@ def _request_id(request: Request, app: FastAPI) -> tuple[str, str]:
     header_name = getattr(settings, "request_id_header", "X-Request-ID")
     request_id = getattr(request.state, "request_id", None)
     if not request_id:
-        request_id = request.headers.get(header_name) or uuid4().hex
+        request_id = sanitize_request_id(request.headers.get(header_name))
         request.state.request_id = request_id
     return request_id, header_name
 
@@ -133,12 +133,17 @@ def create_app(
         if mgr is not None and hasattr(mgr, "shutdown"):
             await mgr.shutdown()
 
+    docs_enabled = getattr(settings, "docs_enabled", None)
+    if docs_enabled is None:
+        docs_enabled = not enable_auth
+
     app = FastAPI(
         title=title,
         version=__version__,
         description="OpenAI and Ollama compatible API powered by ForgeAI",
-        docs_url="/docs",
-        redoc_url="/redoc",
+        docs_url="/docs" if docs_enabled else None,
+        redoc_url="/redoc" if docs_enabled else None,
+        openapi_url="/openapi.json" if docs_enabled else None,
         lifespan=lifespan,
     )
 
@@ -152,15 +157,6 @@ def create_app(
     app.state.audit_logger = audit_logger
     app.state.rate_limiter = rate_limiter
     ENGINE_STATUS.set(1 if engine is not None and getattr(engine, "is_running", False) else 0)
-
-    if enable_cors:
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_credentials=False,
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
 
     @app.exception_handler(EngineManagerError)
     async def handle_engine_manager_error(request: Request, exc: EngineManagerError) -> JSONResponse:
@@ -231,12 +227,12 @@ def create_app(
         request_id, header_name = _request_id(request, request.app)
         request.state.client_ip = request.client.host if request.client else "unknown"
 
-        start = time.time()
+        start = time.monotonic()
         ACTIVE_REQUESTS.inc()
         try:
             response: Response = await call_next(request)
             ACTIVE_REQUESTS.dec()
-            elapsed = time.time() - start
+            elapsed = time.monotonic() - start
             response.headers.setdefault(header_name, request_id)
             record_request(
                 method=request.method,
@@ -261,10 +257,23 @@ def create_app(
             ACTIVE_REQUESTS.dec()
             raise
 
+    # Middleware order (last added is outermost): CORS -> IP rate limit -> auth -> actor rate limit.
+    app.add_middleware(RateLimitMiddleware, mode="actor")
     if enable_auth:
         from forgeai.security.middleware import AuthMiddleware
 
         app.add_middleware(AuthMiddleware)
+    app.add_middleware(RateLimitMiddleware, mode="ip")
+
+    cors_origins = list(getattr(settings, "cors_allow_origins", None) or [])
+    if enable_cors and cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=False,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     app.include_router(health.router, tags=["Health"])
     app.include_router(models.router, prefix="/v1", tags=["Models"])
@@ -274,9 +283,11 @@ def create_app(
     @app.get("/metrics", tags=["Monitoring"])
     async def metrics() -> Response:
         try:
+            from prometheus_client import CONTENT_TYPE_LATEST
+
             from forgeai.monitoring.metrics import generate_metrics
 
-            return Response(content=generate_metrics(), media_type="text/plain")
+            return Response(content=generate_metrics(), media_type=CONTENT_TYPE_LATEST)
         except Exception:
             return Response(content="# No metrics available", media_type="text/plain")
 

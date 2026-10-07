@@ -37,7 +37,23 @@ jobs:
 
       - name: Run safety check
         run: safety check --full-report -i 86338,73285
-        continue-on-error: true
+
+  trivy:
+    name: Trivy Filesystem and Config Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Trivy scan (vulnerabilities, secrets, misconfiguration)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
 
   codeql:
     name: CodeQL Analysis

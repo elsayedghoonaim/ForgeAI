@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import secrets
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -20,6 +19,37 @@ class Role(str, Enum):
     ADMIN = "admin"
     OPERATOR = "operator"
     VIEWER = "viewer"
+
+
+ALLOWED_ALGORITHMS = ("HS256", "HS384", "HS512")
+MIN_SECRET_BYTES = 32
+PLACEHOLDER_SECRETS = frozenset({"change-me", "change-me-in-production"})
+
+
+def validate_auth_secret(secret: str | None) -> str:
+    """Return the secret if it is acceptable, otherwise raise ``ValueError``."""
+
+    if not secret or secret.strip().lower() in PLACEHOLDER_SECRETS:
+        raise ValueError(
+            "auth secret is unset or a placeholder. Set FORGEAI_AUTH_SECRET_KEY to a random "
+            f"value of at least {MIN_SECRET_BYTES} bytes (e.g. `openssl rand -hex 32`)."
+        )
+    if len(secret.encode()) < MIN_SECRET_BYTES:
+        raise ValueError(
+            f"auth secret is too short ({len(secret.encode())} bytes); "
+            f"at least {MIN_SECRET_BYTES} bytes are required."
+        )
+    return secret
+
+
+def validate_auth_algorithm(algorithm: str) -> str:
+    """Return the algorithm if it is an allowed HMAC algorithm, otherwise raise."""
+
+    if algorithm not in ALLOWED_ALGORITHMS:
+        raise ValueError(
+            f"Unsupported auth algorithm '{algorithm}'. Must be one of {list(ALLOWED_ALGORITHMS)}."
+        )
+    return algorithm
 
 
 ROLE_PERMISSIONS: dict[Role, set[str]] = {
@@ -58,14 +88,15 @@ class AuthManager:
 
     def __init__(
         self,
-        secret_key: str = "change-me",
+        secret_key: str,
         algorithm: str = "HS256",
         token_expire_minutes: int = 60,
     ) -> None:
-        self.secret_key = secret_key
-        self.algorithm = algorithm
+        self.secret_key = validate_auth_secret(secret_key)
+        self.algorithm = validate_auth_algorithm(algorithm)
         self.token_expire_minutes = token_expire_minutes
         self._api_keys: dict[str, APIKey] = {}
+        self._keys_by_hash: dict[str, APIKey] = {}
 
     @staticmethod
     def _hash_key(raw_key: str) -> str:
@@ -87,6 +118,7 @@ class AuthManager:
             created_at=datetime.now(UTC).isoformat(),
         )
         self._api_keys[key_id] = api_key
+        self._keys_by_hash[api_key.key_hash] = api_key
         return api_key
 
     def create_api_key(self, name: str, role: Role) -> tuple[str, APIKey]:
@@ -104,11 +136,16 @@ class AuthManager:
     def validate_api_key(self, raw_key: str) -> APIKey | None:
         """Validate a raw API key and return its info."""
 
-        key_hash = self._hash_key(raw_key)
-        for api_key in self._api_keys.values():
-            if api_key.is_active and hmac.compare_digest(api_key.key_hash, key_hash):
-                return api_key
-        return None
+        api_key = self._keys_by_hash.get(self._hash_key(raw_key))
+        if api_key is None or not api_key.is_active:
+            return None
+        if api_key.expires_at:
+            try:
+                if datetime.fromisoformat(api_key.expires_at) <= datetime.now(UTC):
+                    return None
+            except ValueError:
+                return None
+        return api_key
 
     def create_token(self, key_id: str, role: Role) -> str:
         """Create a JWT token for authenticated access."""
@@ -117,7 +154,6 @@ class AuthManager:
         payload = {
             "sub": key_id,
             "role": role.value,
-            "permissions": list(self.permissions_for_role(role)),
             "iat": now.timestamp(),
             "exp": (now + timedelta(minutes=self.token_expire_minutes)).timestamp(),
         }
@@ -127,17 +163,30 @@ class AuthManager:
         """Verify and decode a JWT token."""
 
         try:
-            data = jwt.decode(token, self.secret_key, algorithms=[self.algorithm])
-            return TokenPayload(
-                sub=data["sub"],
-                role=Role(data["role"]),
-                permissions=set(data.get("permissions", [])),
-                exp=data["exp"],
-                iat=data.get("iat", 0),
+            data = jwt.decode(
+                token,
+                self.secret_key,
+                algorithms=[self.algorithm],
+                options={"require": ["exp", "sub", "role"]},
             )
-        except jwt.ExpiredSignatureError:
-            return None
-        except jwt.InvalidTokenError:
+            sub = data["sub"]
+            if not isinstance(sub, str):
+                return None
+            key = self._api_keys.get(sub)
+            if key is None or not key.is_active:
+                return None
+            role = Role(data["role"])
+            if role != key.role:
+                return None
+            # Permissions always come from the role; any "permissions" claim is ignored.
+            return TokenPayload(
+                sub=sub,
+                role=role,
+                permissions=self.permissions_for_role(role),
+                exp=float(data["exp"]),
+                iat=float(data.get("iat", 0)),
+            )
+        except (jwt.InvalidTokenError, ValueError, TypeError):
             return None
 
     def revoke_key(self, key_id: str) -> bool:

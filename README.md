@@ -154,7 +154,7 @@ Daemon-backed CLI commands (`pull`, `run`, `ps`, `stop`, etc.) communicate with 
 Start the single-daemon model server (default local bind: `127.0.0.1:11434`). `serve` takes options only and has no positional model argument.
 
 ```bash
-forgeai serve [--host 127.0.0.1] [--port 11434]
+forgeai serve [--host 127.0.0.1] [--port 11434] [--auth] [--insecure-no-auth]
 ```
 
 ### `pull`
@@ -270,11 +270,16 @@ ForgeAI 2.0.0 uses an NVIDIA vLLM base image (`vllm/vllm-openai:v0.22.1`).
 > [!NOTE]
 > Production operators should resolve and pin the official base image by immutable `RepoDigest` (e.g., `vllm/vllm-openai@sha256:...`) after pulling.
 
+> **Security:** the image runs as uid 10001 with auth enabled (`FORGEAI_AUTH_ENABLED=true`), so `FORGEAI_AUTH_SECRET_KEY` (>= 32 bytes) and `FORGEAI_BOOTSTRAP_API_KEY` are required. `forgeai serve` refuses a non-loopback host without auth unless `--insecure-no-auth` is given. See [SECURITY.md](SECURITY.md); Kubernetes reads both values from the `forgeai-auth` Secret.
+
 ### Docker Build & Run
 
 ```bash
 docker build -t forgeai:2.0.0 .
-docker run --gpus all -p 11434:11434 forgeai:2.0.0
+docker run --gpus all -p 11434:11434 \
+  -e FORGEAI_AUTH_SECRET_KEY="$(openssl rand -hex 32)" \
+  -e FORGEAI_BOOTSTRAP_API_KEY="$(openssl rand -hex 24)" \
+  -v forgeai-data:/data --shm-size=16g forgeai:2.0.0
 ```
 
 ### Docker Compose

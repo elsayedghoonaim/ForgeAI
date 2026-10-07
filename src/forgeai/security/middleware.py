@@ -2,13 +2,29 @@
 
 from __future__ import annotations
 
+import json
+import re
+import time
+from collections import deque
 from uuid import uuid4
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 PUBLIC_PATHS = {"/healthz", "/readyz", "/docs", "/redoc", "/openapi.json"}
+RATE_LIMIT_EXEMPT_PATHS = {"/healthz", "/readyz"}
+
+REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def sanitize_request_id(value: str | None) -> str:
+    """Return ``value`` if it is a safe request ID, otherwise a fresh one."""
+
+    if value and REQUEST_ID_PATTERN.fullmatch(value):
+        return value
+    return uuid4().hex
 
 
 def _required_permission(method: str, path: str) -> str:
@@ -35,7 +51,7 @@ def _request_id(request: Request) -> tuple[str, str]:
     header_name = getattr(settings, "request_id_header", "X-Request-ID")
     request_id = getattr(request.state, "request_id", None)
     if not request_id:
-        request_id = request.headers.get(header_name) or uuid4().hex
+        request_id = sanitize_request_id(request.headers.get(header_name))
         request.state.request_id = request_id
     return request_id, header_name
 
@@ -95,8 +111,56 @@ def _audit(
     )
 
 
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+class _DeniedAuditThrottle:
+    """Per-IP limit on denied-auth audit events so anonymous traffic cannot flood the log."""
+
+    def __init__(self, max_events: int = 10, window_seconds: float = 60.0) -> None:
+        self.max_events = max_events
+        self.window_seconds = window_seconds
+        self._events: dict[str, deque[float]] = {}
+        self._last_sweep = time.monotonic()
+
+    def allow(self, ip: str) -> bool:
+        now = time.monotonic()
+        if now - self._last_sweep >= self.window_seconds:
+            self._last_sweep = now
+            for key in [
+                k for k, v in self._events.items() if not v or now - v[-1] >= self.window_seconds
+            ]:
+                del self._events[key]
+        events = self._events.setdefault(ip, deque())
+        while events and now - events[0] >= self.window_seconds:
+            events.popleft()
+        if len(events) >= self.max_events:
+            return False
+        events.append(now)
+        return True
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
-    """Middleware that enforces auth, authorization, and rate limits."""
+    """Middleware that enforces authentication and authorization."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        super().__init__(app)
+        self._denied_throttle = _DeniedAuditThrottle()
+
+    def _audit_denied_auth(self, request: Request, reason: str, request_id: str) -> None:
+        ip = _client_ip(request)
+        if not self._denied_throttle.allow(ip):
+            return
+        _audit(
+            request,
+            event_type="auth",
+            actor="anonymous",
+            action="authenticate",
+            resource=request.url.path,
+            outcome="denied",
+            details={"reason": reason, "request_id": request_id, "client_ip": ip},
+        )
 
     async def dispatch(self, request: Request, call_next):
         request_id, header_name = _request_id(request)
@@ -109,15 +173,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         auth_header = request.headers.get("Authorization", "")
         api_key = request.headers.get("X-API-Key", "")
         if not auth_header and not api_key:
-            _audit(
-                request,
-                event_type="auth",
-                actor="anonymous",
-                action="authenticate",
-                resource=request.url.path,
-                outcome="denied",
-                details={"reason": "missing_credentials", "request_id": request_id},
-            )
+            self._audit_denied_auth(request, "missing_credentials", request_id)
             return _json_error(
                 request,
                 401,
@@ -139,15 +195,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if api_key:
             key_info = auth_manager.validate_api_key(api_key)
             if key_info is None:
-                _audit(
-                    request,
-                    event_type="auth",
-                    actor="anonymous",
-                    action="authenticate",
-                    resource=request.url.path,
-                    outcome="denied",
-                    details={"reason": "invalid_api_key", "request_id": request_id},
-                )
+                self._audit_denied_auth(request, "invalid_api_key", request_id)
                 return _json_error(request, 401, "Invalid API key")
             actor_id = key_info.key_id
             role = key_info.role.value
@@ -155,15 +203,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         elif auth_header.startswith("Bearer "):
             payload = auth_manager.verify_token(auth_header[7:])
             if payload is None:
-                _audit(
-                    request,
-                    event_type="auth",
-                    actor="anonymous",
-                    action="authenticate",
-                    resource=request.url.path,
-                    outcome="denied",
-                    details={"reason": "invalid_token", "request_id": request_id},
-                )
+                self._audit_denied_auth(request, "invalid_token", request_id)
                 return _json_error(request, 401, "Invalid or expired token")
             actor_id = payload.sub
             role = payload.role.value
@@ -197,31 +237,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 f"Permission '{required_permission}' is required for this resource.",
             )
 
-        rate_limiter = getattr(request.app.state, "rate_limiter", None)
-        if rate_limiter is not None:
-            limit_key = f"{actor_id}:{required_permission or request.url.path}"
-            allowed, retry_after = rate_limiter.check(limit_key)
-            if not allowed:
-                _audit(
-                    request,
-                    event_type="access",
-                    actor=actor_id,
-                    action=request.method,
-                    resource=request.url.path,
-                    outcome="denied",
-                    details={
-                        "permission": required_permission,
-                        "reason": "rate_limited",
-                        "request_id": request_id,
-                    },
-                )
-                return _json_error(
-                    request,
-                    429,
-                    "Rate limit exceeded.",
-                    headers={"Retry-After": str(retry_after)},
-                )
-
         response = await call_next(request)
         response.headers.setdefault(header_name, request_id)
 
@@ -239,3 +254,79 @@ class AuthMiddleware(BaseHTTPMiddleware):
             },
         )
         return response
+
+
+class RateLimitMiddleware:
+    """Pure-ASGI rate limiter that works with or without authentication.
+
+    Two instances are installed: ``mode="ip"`` sits outside auth and keys by client IP
+    (so failed and anonymous requests count), ``mode="actor"`` sits inside auth and
+    keys by the authenticated actor and required permission.
+    """
+
+    def __init__(self, app: ASGIApp, mode: str = "ip") -> None:
+        if mode not in ("ip", "actor"):
+            raise ValueError("mode must be 'ip' or 'actor'")
+        self.app = app
+        self.mode = mode
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope.get("method") == "OPTIONS":
+            await self.app(scope, receive, send)
+            return
+
+        app = scope.get("app")
+        limiter = getattr(getattr(app, "state", None), "rate_limiter", None)
+        path = scope.get("path", "")
+        if limiter is None or path in RATE_LIMIT_EXEMPT_PATHS:
+            await self.app(scope, receive, send)
+            return
+
+        if self.mode == "ip":
+            client = scope.get("client")
+            key = f"ip:{client[0] if client else 'unknown'}"
+        else:
+            state = scope.get("state") or {}
+            actor = state.get("actor_id")
+            if not actor:
+                await self.app(scope, receive, send)
+                return
+            key = f"{actor}:{state.get('required_permission') or path}"
+
+        allowed, retry_after = limiter.check(key)
+        if allowed:
+            await self.app(scope, receive, send)
+            return
+
+        settings = getattr(getattr(app, "state", None), "settings", None)
+        header_name = getattr(settings, "request_id_header", "X-Request-ID")
+        raw_id = None
+        for name, value in scope.get("headers", []):
+            if name.decode("latin-1").lower() == header_name.lower():
+                raw_id = value.decode("latin-1")
+                break
+        request_id = sanitize_request_id(raw_id)
+        if path.startswith("/api/"):
+            payload: dict[str, object] = {"error": "Rate limit exceeded."}
+        else:
+            payload = {
+                "error": {
+                    "message": "Rate limit exceeded.",
+                    "status_code": 429,
+                    "request_id": request_id,
+                }
+            }
+        body = json.dumps(payload).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 429,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                    (b"retry-after", str(retry_after).encode()),
+                    (header_name.lower().encode("latin-1"), request_id.encode("latin-1")),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
