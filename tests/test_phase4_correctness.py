@@ -21,9 +21,6 @@ from unittest.mock import MagicMock, patch
 import httpx
 from typer.testing import CliRunner
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
 import test_ollama_api as base  # noqa: E402
 from forgeai.api.routes.chat import ChatMessage  # noqa: E402
 from forgeai.benchmarking.runner import _spawn_server_process  # noqa: E402

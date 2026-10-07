@@ -366,14 +366,14 @@ def is_oom_exception(exc: BaseException) -> bool:
     )
 
 
-async def _call_offloop_safe(func: Callable[..., Any], *args: Any) -> None:
-    """Call a synchronous or asynchronous function off the main event loop thread."""
+async def _call_offloop_safe(func: Callable[..., Any], *args: Any) -> Any:
+    """Call a sync or async function without blocking the loop; return its (awaited) result."""
     if inspect.iscoroutinefunction(func):
-        res = await func(*args)
-    else:
-        res = await asyncio.to_thread(func, *args)
-        if inspect.isawaitable(res):
-            await res
+        return await func(*args)
+    res = await asyncio.to_thread(func, *args)
+    if inspect.isawaitable(res):
+        res = await res
+    return res
 
 
 async def safe_async_cleanup(
@@ -795,13 +795,7 @@ class EngineManager:
     async def _call_admission_estimator(self, key: EngineKey) -> bool:
         if self.admission_estimator is None:
             return True
-        if inspect.iscoroutinefunction(self.admission_estimator):
-            res = await self.admission_estimator(key)
-        else:
-            res = await asyncio.to_thread(self.admission_estimator, key)
-            if inspect.isawaitable(res):
-                res = await res
-        return bool(res)
+        return bool(await _call_offloop_safe(self.admission_estimator, key))
 
     def _capacity_count_locked(self, key: EngineKey) -> int:
         return sum(

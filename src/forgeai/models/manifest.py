@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Literal, Self, cast
+from typing import Any, Literal, Self, cast
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from forgeai.core.config import normalize_kv_cache_dtype, reject_gguf
 
 _REPO_ID_ERROR = "Invalid HuggingFace repository ID format"
 _REPO_ID_MAX_LENGTH = 200
@@ -28,12 +30,7 @@ def validate_repo_id_string(model_str: str) -> None:
         raise ValueError(f"{_REPO_ID_ERROR}: surrounding whitespace is not allowed: {model_str!r}")
 
     model_lower = model_str.lower()
-    if ".gguf" in model_lower:
-        raise ValueError(
-            f"ERROR: GGUF model format is unsupported in ForgeAI v2.0+ (model: {model_str!r}). "
-            "llama.cpp has been removed in favor of vLLM. "
-            "Remediation: Specify a Hugging Face repo ID or local safetensors directory."
-        )
+    reject_gguf(model_str)
 
     if model_lower.endswith(".bin") or model_lower.endswith(".pt"):
         raise ValueError(
@@ -127,9 +124,12 @@ class KVCacheSettings(BaseModel):
 
     model_config = ConfigDict(validate_assignment=True, extra="forbid")
 
-    dtype: Literal["auto", "fp8", "turboquant_k8v4", "turboquant_4bit_nc"] = Field(
-        default="auto"
-    )
+    dtype: str = Field(default="auto")
+
+    @field_validator("dtype", mode="before")
+    @classmethod
+    def validate_dtype(cls, value: Any) -> str:
+        return normalize_kv_cache_dtype(value)
 
 
 class ForgeAIManifest(BaseModel):
@@ -154,12 +154,7 @@ class ForgeAIManifest(BaseModel):
         model_str = self.model.strip()
         model_lower = model_str.lower()
 
-        if model_lower.endswith(".gguf") or ".gguf" in model_lower:
-            raise ValueError(
-                f"ERROR: GGUF model format is unsupported in ForgeAI v2.0+ (model: {model_str!r}). "
-                "llama.cpp has been removed in favor of vLLM. "
-                "Remediation: Specify a Hugging Face repo ID or local safetensors directory."
-            )
+        reject_gguf(model_str)
 
         if model_lower.endswith(".bin") or model_lower.endswith(".pt"):
             raise ValueError(

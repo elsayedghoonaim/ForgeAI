@@ -8,9 +8,6 @@ import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-# Ensure the src folder is on Python path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
 from forgeai.core.security import (
     check_vllm_version,
     sanitize_path,

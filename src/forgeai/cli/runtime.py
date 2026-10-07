@@ -292,6 +292,17 @@ def handle_cli_error(err: Any) -> NoReturn:
     raise typer.Exit(code=1)
 
 
+def exit_if_gguf(*models: str | None) -> None:
+    """Exit with the standard GGUF-unsupported error if any model reference is a GGUF."""
+    from forgeai.core.config import reject_gguf
+
+    for model in models:
+        try:
+            reject_gguf(model)
+        except ValueError as err:
+            handle_cli_error(err)
+
+
 CHAT_MAX_NUM_SEQS_ENV = "forgeai_MAX_NUM_SEQS"
 CHAT_MAX_MODEL_LEN_ENV = "forgeai_MAX_MODEL_LEN"
 CHAT_ENFORCE_EAGER_ENV = "forgeai_ENFORCE_EAGER"
@@ -659,6 +670,17 @@ def _round_down_power_of_two(
     return max(minimum, min(maximum, rounded))
 
 
+def _limiting_gpu(tuning: RuntimeTuning, attr: str) -> Any:
+    """Return the target GPU with the least ``attr`` memory, or None if unknown."""
+    if tuning.topology is None:
+        return None
+    target_gpus = get_target_gpus(
+        tuning.topology,
+        tensor_parallel_size=tuning.tensor_parallel_size,
+    )
+    return min(target_gpus, key=lambda gpu: getattr(gpu, attr)) if target_gpus else None
+
+
 def print_runtime_tuning(tuning: RuntimeTuning) -> None:
     """Emit concise tuning details for CLI commands."""
 
@@ -668,12 +690,8 @@ def print_runtime_tuning(tuning: RuntimeTuning) -> None:
     if tuning.auto_gpu_utilization:
         detail = ""
         if tuning.topology is not None and tuning.topology.gpu_count > 0:
-            target_gpus = get_target_gpus(
-                tuning.topology,
-                tensor_parallel_size=tuning.tensor_parallel_size,
-            )
-            if target_gpus:
-                limiting_gpu = min(target_gpus, key=lambda gpu: gpu.free_memory_mb)
+            limiting_gpu = _limiting_gpu(tuning, "free_memory_mb")
+            if limiting_gpu is not None:
                 detail = (
                     f" based on current free VRAM "
                     f"({limiting_gpu.free_memory_mb / 1024:.2f} GiB free on GPU {limiting_gpu.index})"
@@ -686,12 +704,8 @@ def print_runtime_tuning(tuning: RuntimeTuning) -> None:
     if tuning.auto_max_num_seqs:
         seqs_detail = ""
         if tuning.profile == "chat" and tuning.topology is not None and tuning.topology.gpu_count > 0:
-            target_gpus = get_target_gpus(
-                tuning.topology,
-                tensor_parallel_size=tuning.tensor_parallel_size,
-            )
-            if target_gpus:
-                limiting_gpu = min(target_gpus, key=lambda gpu: gpu.free_memory_mb)
+            limiting_gpu = _limiting_gpu(tuning, "free_memory_mb")
+            if limiting_gpu is not None:
                 seqs_detail = (
                     f" for interactive chat "
                     f"({limiting_gpu.free_memory_mb / 1024:.2f} GiB free on GPU {limiting_gpu.index})"
@@ -702,12 +716,8 @@ def print_runtime_tuning(tuning: RuntimeTuning) -> None:
     if tuning.auto_max_model_len:
         context_detail = ""
         if tuning.topology is not None and tuning.topology.gpu_count > 0:
-            target_gpus = get_target_gpus(
-                tuning.topology,
-                tensor_parallel_size=tuning.tensor_parallel_size,
-            )
-            if target_gpus:
-                limiting_gpu = min(target_gpus, key=lambda gpu: gpu.total_memory_mb)
+            limiting_gpu = _limiting_gpu(tuning, "total_memory_mb")
+            if limiting_gpu is not None:
                 context_detail = (
                     f" to reduce startup overhead "
                     f"on {limiting_gpu.total_memory_mb / 1024:.2f} GiB GPUs"
@@ -724,12 +734,8 @@ def print_runtime_tuning(tuning: RuntimeTuning) -> None:
     if tuning.auto_enforce_eager:
         eager_detail = ""
         if tuning.topology is not None and tuning.topology.gpu_count > 0:
-            target_gpus = get_target_gpus(
-                tuning.topology,
-                tensor_parallel_size=tuning.tensor_parallel_size,
-            )
-            if target_gpus:
-                limiting_gpu = min(target_gpus, key=lambda gpu: gpu.total_memory_mb)
+            limiting_gpu = _limiting_gpu(tuning, "total_memory_mb")
+            if limiting_gpu is not None:
                 eager_detail = (
                     f" to reduce startup compile overhead "
                     f"on {limiting_gpu.total_memory_mb / 1024:.2f} GiB GPUs"

@@ -15,20 +15,15 @@ if TYPE_CHECKING:
     from forgeai.core.backends.factory import (
         create_backend as create_backend,
     )
-    from forgeai.core.backends.factory import (
-        resolve_backend as resolve_backend,
-    )
 
 _LAZY: dict[str, str] = {
     "BaseBackend": "forgeai.core.backends.base",
     "create_backend": "forgeai.core.backends.factory",
-    "resolve_backend": "forgeai.core.backends.factory",
 }
 
 __all__ = [
     "BaseBackend",
     "create_backend",
-    "resolve_backend",
 ]
 
 

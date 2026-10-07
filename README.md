@@ -213,6 +213,14 @@ Remove a model manifest or local model registration.
 forgeai rm Qwen/Qwen2.5-7B-Instruct
 ```
 
+### `benchmark`
+TurboQuant plan / evaluate / hardware-execute harness (safe by default: `plan` is inert; `execute` needs `--acknowledge-hardware-run`).
+
+```bash
+forgeai benchmark Qwen/Qwen3-0.6B --mode plan
+forgeai benchmark Qwen/Qwen3-0.6B --mode evaluate --input artifact.json
+```
+
 ---
 
 ## Deprecated & Rejected Flags (Migration Matrix)

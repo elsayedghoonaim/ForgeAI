@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["vllm", "llm", "inference", "cli", "devtool", "gpu", "turboquant", "ollama"]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
@@ -50,18 +50,13 @@ dev = [
     "ruff>=0.16,<0.17",
     "mypy>=2.4,<2.5",
 ]
-gpu = [
-    "vllm==0.22.1",
-    "nvidia-ml-py>=12.0.0",
-]
 vllm = [
     "vllm==0.22.1",
     "nvidia-ml-py>=12.0.0",
 ]
-all = [
-    "vllm==0.22.1",
-    "nvidia-ml-py>=12.0.0",
-]
+# Aliases of the single `vllm` extra.
+gpu = ["forgeai[vllm]"]
+all = ["forgeai[vllm]"]
 
 [project.scripts]
 forgeai = "forgeai.cli.main:app"
@@ -108,5 +103,5 @@ disallow_untyped_defs = false
 cache_dir = "/tmp/forgeai-mypy-cache"
 
 [[tool.mypy.overrides]]
-module = ["PIL", "PIL.*", "pynvml", "vllm", "vllm.*", "ray", "torch", "yaml"]
+module = ["pynvml", "vllm", "vllm.*", "ray", "torch", "yaml"]
 ignore_missing_imports = true

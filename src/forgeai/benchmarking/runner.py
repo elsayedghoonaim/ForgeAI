@@ -43,8 +43,10 @@ from forgeai.benchmarking.turboquant import (
     ProfileResult,
     TurboQuantBenchmarkArtifact,
     evaluate_artifact,
+    max_allowed_unload_vram_mb,
     parse_cuda_compute_capability,
 )
+from forgeai.core.security import vllm_version_matches
 
 logger = logging.getLogger(__name__)
 
@@ -203,7 +205,7 @@ def run_preflight(
     installed_ver = ""
     try:
         installed_ver = get_vllm_ver()
-        if installed_ver != VLLM_PINNED_VERSION:
+        if not vllm_version_matches(installed_ver, VLLM_PINNED_VERSION):
             errors.append(
                 f"Installed vLLM version '{installed_ver}' does not match required contract version '{VLLM_PINNED_VERSION}'."
             )
@@ -238,7 +240,7 @@ def run_preflight(
         passed=passed,
         errors=errors,
         hardware=hw,
-        vllm_version=VLLM_CONTRACT_SPEC if installed_ver == VLLM_PINNED_VERSION else f"vllm=={installed_ver}",
+        vllm_version=VLLM_CONTRACT_SPEC if vllm_version_matches(installed_ver, VLLM_PINNED_VERSION) else f"vllm=={installed_ver}",
     )
 
 
@@ -647,11 +649,11 @@ class SequentialBenchmarkRunner:
             prof_res.status = STATUS_INCOMPLETE  # Will be updated by evaluate_artifact
 
             # Atomically save artifact progress after every profile
-            current_artifact = evaluate_artifact(current_artifact)
+            current_artifact = evaluate_artifact(current_artifact, min_soak_seconds=self.soak_duration_seconds)
             self._save_artifact_atomically(current_artifact)
 
         # Final evaluation and persistence
-        final_evaluated = evaluate_artifact(current_artifact)
+        final_evaluated = evaluate_artifact(current_artifact, min_soak_seconds=self.soak_duration_seconds)
         self._save_artifact_atomically(final_evaluated)
         return final_evaluated
 
@@ -788,7 +790,7 @@ class SequentialBenchmarkRunner:
             eval_notes.append("GPU memory sampler query failed for post-unload residual VRAM.")
 
         # Leak threshold uses total_vram_mb matching evaluator
-        max_allowed_unload_vram = max(100.0, 0.02 * total_vram_mb) if total_vram_mb > 0 else 100.0
+        max_allowed_unload_vram = max_allowed_unload_vram_mb(total_vram_mb)
         if post_unload_residual is not None:
             has_memory_leak = post_unload_residual > max_allowed_unload_vram
         else:

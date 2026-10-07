@@ -330,26 +330,6 @@ def test_cached_models_count_hardlinks_once(tmp_path: Path) -> None:
     assert _dir_size_no_follow(root) == 100
 
 
-def test_garbage_collect_deletes_unreferenced_blobs(tmp_path: Path) -> None:
-    cache = CacheManager(forgeai_home=tmp_path / "home")
-    keep = _fake_snapshot(cache, "org/demo", "keep", "main", 10)
-    drop = _fake_snapshot(cache, "org/demo", "drop", "old", 20)
-    blobs = cache.get_repo_dir("org/demo") / "blobs"
-    (blobs / "blob-partial.incomplete").write_bytes(b"p")
-    orphan = blobs / "blob-orphan"
-    orphan.write_bytes(b"o" * 5)
-
-    removed = cache.garbage_collect_unreferenced([str(keep)])
-
-    assert removed == 1
-    assert keep.exists() and not drop.exists()
-    assert (blobs / "blob-keep").exists()
-    assert not (blobs / "blob-drop").exists()
-    assert not orphan.exists()
-    assert (blobs / "blob-partial.incomplete").exists()  # in-flight download is left alone
-    assert (keep / "model.safetensors").stat().st_size == 10  # symlink still resolves
-
-
 def test_download_snapshot_uses_allow_patterns_without_bin(tmp_path: Path) -> None:
     cache = CacheManager(forgeai_home=tmp_path / "home")
     with patch("huggingface_hub.snapshot_download", return_value=str(tmp_path / "snap")) as dl:

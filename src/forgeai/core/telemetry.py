@@ -12,9 +12,11 @@ Disabled by default. Enable via FORGEAI_TELEMETRY_ENABLED=true.
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import uuid
+from collections import deque
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +31,8 @@ class TelemetryCollector:
     No data is transmitted anywhere unless explicitly configured.
     """
 
+    MAX_BUFFERED_EVENTS = 1000
+
     def __init__(self, enabled: bool = False, storage_dir: str | None = None) -> None:
         self._enabled = enabled
         self._instance_id = str(uuid.uuid4())[:8]
@@ -36,7 +40,7 @@ class TelemetryCollector:
             storage_dir
             or os.path.join(os.path.expanduser("~"), ".forgeai", "telemetry")
         )
-        self._events: list[dict[str, Any]] = []
+        self._events: deque[dict[str, Any]] = deque(maxlen=self.MAX_BUFFERED_EVENTS)
 
     @property
     def enabled(self) -> bool:
@@ -84,9 +88,9 @@ class TelemetryCollector:
         self._enabled = False
         self._events.clear()
 
-    def __del__(self) -> None:
-        """Flush remaining events on cleanup."""
-        with suppress(BaseException):
+    def shutdown(self) -> None:
+        """Flush remaining events; safe to call repeatedly (registered with atexit)."""
+        with suppress(Exception):
             self.flush()
 
 
@@ -94,6 +98,7 @@ class TelemetryCollector:
 _telemetry = TelemetryCollector(
     enabled=os.environ.get("FORGEAI_TELEMETRY_ENABLED", "false").lower() == "true"
 )
+atexit.register(_telemetry.shutdown)
 
 
 def get_telemetry() -> TelemetryCollector:

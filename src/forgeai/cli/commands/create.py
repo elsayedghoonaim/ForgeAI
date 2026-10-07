@@ -9,7 +9,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
-from forgeai.cli.runtime import handle_cli_error
+from forgeai.cli.runtime import exit_if_gguf, handle_cli_error
 
 console = Console()
 app = typer.Typer(invoke_without_command=True)
@@ -71,19 +71,7 @@ def create(
 
     # Explicit GGUF rejection before schema validation
     model_ref = str(yaml_data.get("model") or model).strip()
-    model_ref_lower = model_ref.lower()
-    model_tag_lower = model.lower()
-    if (
-        model_ref_lower.endswith(".gguf")
-        or ".gguf" in model_ref_lower
-        or model_tag_lower.endswith(".gguf")
-        or ".gguf" in model_tag_lower
-    ):
-        handle_cli_error(
-            f"ERROR: GGUF model format is unsupported in ForgeAI v2.0+ (model: {model_ref!r}). "
-            "llama.cpp has been removed in favor of vLLM. "
-            "Remediation: Specify a Hugging Face repo ID or local safetensors directory."
-        )
+    exit_if_gguf(model_ref, model)
 
     # Override public name consistently with MODEL argument
     yaml_data["name"] = model

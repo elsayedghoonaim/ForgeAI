@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-import sys
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from forgeai.api.server import create_app
 

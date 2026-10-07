@@ -18,9 +18,7 @@ from forgeai.core.resource_profiles import (
     PRIMARY_PROFILES,
     RESOURCE_PROFILES,
     ProfileUnavailableError,
-    UnsupportedPlatformError,
     get_resource_profile,
-    select_resource_profile,
 )
 from forgeai.monitoring.metrics import (
     generate_metrics,
@@ -52,7 +50,8 @@ class ResourceProfileCatalogTests(unittest.TestCase):
         self.assertIn("turboquant_3bit_nc", RESOURCE_PROFILES)
         self.assertIn("turboquant_k8v4", RESOURCE_PROFILES)
 
-        self.assertEqual(PRIMARY_PROFILES, ("auto", "fp8", "turboquant_4bit_nc", "turboquant_3bit_nc"))
+        self.assertEqual(PRIMARY_PROFILES, ("auto", "fp8", "turboquant_k8v4", "turboquant_4bit_nc"))
+        self.assertNotIn("turboquant_3bit_nc", PRIMARY_PROFILES)
 
     def test_catalog_facts(self) -> None:
         auto_prof = RESOURCE_PROFILES["auto"]
@@ -89,137 +88,6 @@ class ResourceProfileCatalogTests(unittest.TestCase):
     def test_unknown_profile_lookup_raises(self) -> None:
         with self.assertRaises(ProfileUnavailableError):
             get_resource_profile("invalid_profile_xyz")
-
-
-class ResourceProfileSelectionTests(unittest.TestCase):
-    """Test selection policies, conservative defaults, platform policy, and no-fallback errors."""
-
-    def test_conservative_default_selection(self) -> None:
-        # Default workload yields auto (BF16) without needing hardware capability
-        prof_default = select_resource_profile(platform="cuda", workload="default")
-        self.assertEqual(prof_default.name, "auto")
-
-        prof_latency = select_resource_profile(platform="cuda", workload="latency")
-        self.assertEqual(prof_latency.name, "auto")
-
-        prof_quality = select_resource_profile(platform="cuda", workload="quality")
-        self.assertEqual(prof_quality.name, "auto")
-
-    def test_unknown_workload_raises_value_error(self) -> None:
-        with self.assertRaises(ValueError) as ctx:
-            select_resource_profile(platform="cuda", workload="invalid_workload_abc")
-        self.assertIn("unknown or unsupported workload", str(ctx.exception).lower())
-
-    def test_unsupported_platform_cpu_raises_error(self) -> None:
-        with self.assertRaises(UnsupportedPlatformError) as ctx:
-            select_resource_profile(platform="cpu")
-        self.assertIn("unsupported", str(ctx.exception).lower())
-
-        with self.assertRaises(UnsupportedPlatformError):
-            select_resource_profile(platform="intel")
-
-        with self.assertRaises(UnsupportedPlatformError):
-            select_resource_profile(platform="metal")
-
-    def test_rocm_never_selects_turboquant(self) -> None:
-        # Memory workload on ROCm selects fp8 if allowed, otherwise auto
-        prof_rocm_mem = select_resource_profile(platform="rocm", workload="memory", allow_fp8=True)
-        self.assertEqual(prof_rocm_mem.name, "fp8")
-
-        prof_rocm_no_fp8 = select_resource_profile(platform="rocm", workload="memory", allow_fp8=False)
-        self.assertEqual(prof_rocm_no_fp8.name, "auto")
-
-        # Explicitly requesting TurboQuant on ROCm raises UnsupportedPlatformError
-        with self.assertRaises(UnsupportedPlatformError):
-            select_resource_profile(platform="rocm", requested_profile="turboquant_4bit_nc")
-
-    def test_missing_cuda_cc_cannot_enable_turboquant(self) -> None:
-        # Default cuda_compute_capability is None; explicit request fails CC gate
-        with self.assertRaises(ProfileUnavailableError) as ctx:
-            select_resource_profile(
-                platform="cuda",
-                cuda_compute_capability=None,
-                requested_profile="turboquant_4bit_nc",
-                hw_validation_passed=True,
-                quality_validation_passed=True,
-            )
-        self.assertIn("compute capability", str(ctx.exception).lower())
-
-        # Auto selection with memory workload and missing CC cannot select TurboQuant
-        prof_no_cc = select_resource_profile(
-            platform="cuda",
-            cuda_compute_capability=None,
-            workload="memory",
-            hw_validation_passed=True,
-            quality_validation_passed=True,
-            allow_fp8=True,
-        )
-        self.assertEqual(prof_no_cc.name, "fp8")
-
-    def test_nvidia_memory_workload_selection_with_cc(self) -> None:
-        # NVIDIA CUDA memory workload with CC >= 7.5 and validation flags true selects turboquant_4bit_nc
-        prof_tq4 = select_resource_profile(
-            platform="cuda",
-            cuda_compute_capability=(8, 0),
-            workload="memory",
-            hw_validation_passed=True,
-            quality_validation_passed=True,
-        )
-        self.assertEqual(prof_tq4.name, "turboquant_4bit_nc")
-
-        # NVIDIA CUDA memory workload without validation flags, with allow_fp8 selects fp8
-        prof_fp8 = select_resource_profile(
-            platform="cuda",
-            cuda_compute_capability=(8, 0),
-            workload="memory",
-            allow_fp8=True,
-            hw_validation_passed=False,
-        )
-        self.assertEqual(prof_fp8.name, "fp8")
-
-    def test_turboquant_compute_capability_check(self) -> None:
-        # CUDA compute capability 7.0 (< 7.5) requesting TurboQuant 4-bit raises ProfileUnavailableError
-        with self.assertRaises(ProfileUnavailableError) as ctx:
-            select_resource_profile(
-                platform="cuda",
-                cuda_compute_capability=(7, 0),
-                requested_profile="turboquant_4bit_nc",
-                hw_validation_passed=True,
-                quality_validation_passed=True,
-            )
-        self.assertIn("compute capability", str(ctx.exception).lower())
-
-    def test_poc_gated_turboquant_requires_validation_flags(self) -> None:
-        # TurboQuant 4-bit without validation flags raises ProfileUnavailableError
-        with self.assertRaises(ProfileUnavailableError):
-            select_resource_profile(
-                platform="cuda",
-                cuda_compute_capability=(8, 0),
-                requested_profile="turboquant_4bit_nc",
-                hw_validation_passed=False,
-            )
-
-        # TurboQuant 3-bit requires aggressive_quality_passed
-        with self.assertRaises(ProfileUnavailableError):
-            select_resource_profile(
-                platform="cuda",
-                cuda_compute_capability=(8, 0),
-                requested_profile="turboquant_3bit_nc",
-                hw_validation_passed=True,
-                quality_validation_passed=True,
-                aggressive_quality_passed=False,
-            )
-
-        # TurboQuant 3-bit with all validation flags succeeds
-        prof_tq3 = select_resource_profile(
-            platform="cuda",
-            cuda_compute_capability=(8, 0),
-            requested_profile="turboquant_3bit_nc",
-            hw_validation_passed=True,
-            quality_validation_passed=True,
-            aggressive_quality_passed=True,
-        )
-        self.assertEqual(prof_tq3.name, "turboquant_3bit_nc")
 
 
 class KVMemoryEstimatorTests(unittest.TestCase):

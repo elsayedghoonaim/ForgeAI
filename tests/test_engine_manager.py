@@ -1,13 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 import threading
 import unittest
-from pathlib import Path
 from typing import Any
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from forgeai.core.backends.vllm_backend import validate_turboquant_hardware
 from forgeai.core.config import DevToolSettings, KVCacheSettings, QuantizationType

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,8 +8,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import httpx
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from forgeai.api.routes.chat import ChatCompletionRequest, create_chat_completion
 from forgeai.api.routes.ollama import generate

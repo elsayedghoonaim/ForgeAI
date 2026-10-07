@@ -9,12 +9,9 @@ import sys
 import threading
 import time
 import unittest
-from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from forgeai.api.routes.ollama import _ndjson_stream_response
 from forgeai.api.runtime import SharedRuntimeAdapter

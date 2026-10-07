@@ -1,15 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 import unittest
 from inspect import iscoroutinefunction
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 # Ensure the src folder is on Python path
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
 from forgeai.cli.runtime import (
     recommend_chat_max_model_len,
     recommend_chat_max_num_seqs,

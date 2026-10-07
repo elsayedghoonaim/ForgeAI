@@ -124,16 +124,10 @@ def batch(
     import httpx
     from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
-    from forgeai.cli.runtime import DaemonClient, DaemonClientError, handle_cli_error
+    from forgeai.cli.runtime import DaemonClient, DaemonClientError, exit_if_gguf, handle_cli_error
     from forgeai.core.telemetry import track_event
 
-    if ".gguf" in model.lower():
-        console.print(
-            f"[red]ERROR:[/red] GGUF model format is unsupported in ForgeAI v2.0+ (model: {model!r}). "
-            "llama.cpp has been removed in favor of vLLM. "
-            "Remediation: Specify a Hugging Face repo ID or local safetensors directory."
-        )
-        raise typer.Exit(code=1)
+    exit_if_gguf(model)
     if batch_size < 1:
         handle_cli_error("--batch-size must be at least 1.")
 

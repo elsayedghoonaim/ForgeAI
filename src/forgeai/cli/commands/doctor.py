@@ -49,15 +49,10 @@ def check_vllm_diagnostic(vllm_module: Any = None) -> tuple[bool, str]:
     if ver is None:
         return False, "Installed: unknown → pip install 'vllm==0.22.1'"
 
-    try:
-        from forgeai.core.security import REQUIRED_VLLM_VERSION, _parse_version
+    from forgeai.core.security import REQUIRED_VLLM_VERSION, vllm_version_matches
 
-        installed_ver = _parse_version(str(ver))
-        req_ver = _parse_version(REQUIRED_VLLM_VERSION)
-        if installed_ver.public != req_ver.public:
-            return False, escape(f"Installed: {ver} → pip install 'vllm=={REQUIRED_VLLM_VERSION}'")
-    except Exception:
-        return False, escape(f"Installed: {ver} → pip install 'vllm==0.22.1'")
+    if not vllm_version_matches(ver):
+        return False, escape(f"Installed: {ver} → pip install 'vllm=={REQUIRED_VLLM_VERSION}'")
 
     return True, escape(f"Installed: {ver}")
 

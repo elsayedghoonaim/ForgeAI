@@ -9,10 +9,11 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
+from forgeai.core.config import RUNTIME_KV_CACHE_DTYPES, normalize_kv_cache_dtype
+
 console = Console()
 app = typer.Typer()
 
-ALLOWED_SAVED_KV_DTYPES: set[str] = {"auto", "fp8", "turboquant_k8v4", "turboquant_4bit_nc"}
 
 
 @app.command("save")
@@ -28,7 +29,7 @@ def save_profile(
     kv_cache_dtype: str = typer.Option(
         "auto",
         "--kv-cache-dtype",
-        help="KV-cache dtype profile (auto, fp8, turboquant_k8v4, turboquant_4bit_nc)",
+        help=f"KV-cache dtype profile ({', '.join(RUNTIME_KV_CACHE_DTYPES)})",
     ),
 ) -> None:
     """Save a reproducible deployment profile."""
@@ -36,18 +37,11 @@ def save_profile(
     from forgeai.core.config import DevToolSettings
     from forgeai.utils.helpers import save_yaml
 
-    kv_lower = kv_cache_dtype.lower().strip()
-    if kv_lower == "turboquant_3bit_nc":
-        console.print(
-            "[red]✗ Error:[/red] Profile 'turboquant_3bit_nc' is an aggressive POC-only profile and cannot be saved in deployment profiles."
-        )
-        raise typer.Exit(code=1)
-
-    if kv_lower not in ALLOWED_SAVED_KV_DTYPES:
-        console.print(
-            f"[red]✗ Error:[/red] Invalid --kv-cache-dtype '{kv_cache_dtype}'. Allowed options: {', '.join(sorted(ALLOWED_SAVED_KV_DTYPES))}"
-        )
-        raise typer.Exit(code=1)
+    try:
+        kv_lower = normalize_kv_cache_dtype(kv_cache_dtype)
+    except ValueError as err:
+        console.print(f"[red]✗ Error:[/red] {err}")
+        raise typer.Exit(code=1) from err
 
     settings = DevToolSettings()
     profile_dir = Path(settings.profiles_dir)

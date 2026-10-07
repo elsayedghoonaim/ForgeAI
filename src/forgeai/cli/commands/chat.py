@@ -101,16 +101,10 @@ def chat(
     response is streaming cancels that response and returns to the prompt.
     """
     from forgeai.cli.repl import run_repl
-    from forgeai.cli.runtime import DaemonClient, DaemonClientError, handle_cli_error
+    from forgeai.cli.runtime import DaemonClient, DaemonClientError, exit_if_gguf, handle_cli_error
     from forgeai.core.telemetry import track_event
 
-    if ".gguf" in model.lower():
-        console.print(
-            f"[red]ERROR:[/red] GGUF model format is unsupported in ForgeAI v2.0+ (model: {model!r}). "
-            "llama.cpp has been removed in favor of vLLM. "
-            "Remediation: Specify a Hugging Face repo ID or local safetensors directory."
-        )
-        raise typer.Exit(code=1)
+    exit_if_gguf(model)
 
     console.print("\n[bold cyan]ForgeAI Chat[/bold cyan]")
     console.print(f"  Model: {model}")

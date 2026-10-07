@@ -82,13 +82,7 @@ if TYPE_CHECKING:
         ResourceProfile as ResourceProfile,
     )
     from forgeai.core.resource_profiles import (
-        UnsupportedPlatformError as UnsupportedPlatformError,
-    )
-    from forgeai.core.resource_profiles import (
         get_resource_profile as get_resource_profile,
-    )
-    from forgeai.core.resource_profiles import (
-        select_resource_profile as select_resource_profile,
     )
     from forgeai.core.security import (
         check_vllm_version as check_vllm_version,
@@ -125,9 +119,7 @@ _LAZY: dict[str, str] = {
     "RESOURCE_PROFILES": "forgeai.core.resource_profiles",
     "ProfileUnavailableError": "forgeai.core.resource_profiles",
     "ResourceProfile": "forgeai.core.resource_profiles",
-    "UnsupportedPlatformError": "forgeai.core.resource_profiles",
     "get_resource_profile": "forgeai.core.resource_profiles",
-    "select_resource_profile": "forgeai.core.resource_profiles",
     "check_vllm_version": "forgeai.core.security",
     "sanitize_path": "forgeai.core.security",
     "validate_parallelism": "forgeai.core.security",
@@ -157,12 +149,10 @@ __all__ = [
     "ROCmDeferredError",
     "ResourceProfile",
     "TurboQuantHWCCError",
-    "UnsupportedPlatformError",
     "check_vllm_version",
     "get_resource_profile",
     "parse_keep_alive",
     "sanitize_path",
-    "select_resource_profile",
     "validate_parallelism",
 ]
 
