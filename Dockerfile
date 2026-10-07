@@ -15,9 +15,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HOME=/data \
     HF_HOME=/data/huggingface \
     FORGEAI_HOME=/data/forgeai \
-    XDG_CACHE_HOME=/data/.cache \
-    FORGEAI_AUTH_ENABLED=true
-# Auth is on by default. Provide FORGEAI_AUTH_SECRET_KEY (>= 32 bytes) and
+    XDG_CACHE_HOME=/data/.cache
+# Auth is enabled via the default CMD (--auth); `forgeai serve` also refuses to bind
+# a non-loopback host without auth. Provide FORGEAI_AUTH_SECRET_KEY (>= 32 bytes) and
 # FORGEAI_BOOTSTRAP_API_KEY at runtime (env or orchestrator secret), or the server refuses to start.
 
 # Run as an unprivileged user; all writable state lives under /data.

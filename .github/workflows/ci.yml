@@ -14,10 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
@@ -26,10 +26,8 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
-      # Keep CI blocking on syntax/undefined-name correctness while the
-      # repository's existing style/modernization Ruff debt is cleaned up.
-      - name: Lint critical correctness
-        run: python -m ruff check src tests --select E9,F63,F7,F82
+      - name: Lint
+        run: python -m ruff check src tests
 
       - name: Type check
         run: python -m mypy src/forgeai
