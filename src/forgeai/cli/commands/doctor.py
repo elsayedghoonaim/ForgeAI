@@ -14,8 +14,6 @@ from typing import Any
 import typer
 from rich.console import Console
 from rich.markup import escape
-from rich.panel import Panel
-from rich.table import Table
 
 console = Console()
 app = typer.Typer(invoke_without_command=True)
@@ -175,6 +173,7 @@ def doctor(
     full: bool = typer.Option(False, "--full", help="Run full audit report"),
 ) -> None:
     """System diagnostics with actionable remediation and deployment audit report."""
+    from rich.table import Table
     console.print("\n[bold cyan]ForgeAI Doctor[/bold cyan]\n")
     from forgeai.core.telemetry import track_event
 
@@ -263,6 +262,7 @@ def doctor(
 
 def _print_audit_report(checks: list[tuple[str, bool, str]], score: float) -> None:
     """Generate full deployment audit report."""
+    from rich.panel import Panel
     report = (
         f"[bold]Deployment Audit Report[/bold]\n"
         f"Date:     {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}\n"

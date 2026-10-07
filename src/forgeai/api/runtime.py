@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from forgeai.core.config import DevToolSettings
@@ -45,25 +47,38 @@ class SharedRuntimeAdapter:
         return f"{name}:{version}"
 
     def get_manifest_and_record(self, tag: str) -> tuple[ForgeAIManifest, ModelRecord]:
-        """Resolve tag to manifest and ModelRecord. Raises KeyError if not found."""
+        """Resolve tag to manifest and ModelRecord. Raises KeyError if not found.
+
+        The record carries the (cached) parsed manifest, so the manifest file is not re-read.
+        """
         resolved_tag = self.resolve_tag(tag)
         try:
             record = self.model_registry.get_record(resolved_tag, cache_manager=self.cache_manager)
-            manifest = self.model_registry.get_manifest(resolved_tag)
-            return manifest, record
         except KeyError:
             if ":" not in tag:
-                record = self.model_registry.get_record(f"{tag}:latest", cache_manager=self.cache_manager)
-                manifest = self.model_registry.get_manifest(f"{tag}:latest")
-                return manifest, record
-            raise
+                record = self.model_registry.get_record(
+                    f"{tag}:latest", cache_manager=self.cache_manager
+                )
+            else:
+                raise
+        manifest = record.manifest
+        if manifest is None:  # registries that predate record.manifest
+            manifest = self.model_registry.get_manifest(record.ref.full_tag)
+        return manifest, record
 
     def build_engine_key(self, manifest: ForgeAIManifest, record: ModelRecord) -> EngineKey:
         """Construct deterministic EngineKey from manifest and record."""
         # The key must not depend on download state (the snapshot path/size changes once the
         # model is pulled), otherwise the same model would be loaded twice. Identity comes
         # from the model id, revision and manifest digest only.
-        repo_id = manifest.model
+        # For local_dir manifests ``model`` is the directory, which the engine loads from
+        # directly (EngineKey.to_settings sets model_path when the path exists). For
+        # huggingface manifests it is the repo id and ``revision`` pins the snapshot.
+        repo_id = (
+            str(Path(manifest.model).expanduser().resolve())
+            if getattr(manifest, "source_kind", "huggingface") == "local_dir"
+            else manifest.model
+        )
 
         chat_template_digest = (
             hashlib.sha256(manifest.chat_template.encode("utf-8")).hexdigest()
@@ -114,7 +129,7 @@ class SharedRuntimeAdapter:
         self, tag: str, keep_alive: Any = None
     ) -> tuple[EngineLease, ForgeAIManifest, ModelRecord, EngineKey]:
         """Pre-acquire an engine lease before returning HTTP responses."""
-        key, manifest, record = self.get_engine_key_for_tag(tag)
+        key, manifest, record = await asyncio.to_thread(self.get_engine_key_for_tag, tag)
         lease = await self.engine_manager.acquire(key, keep_alive=keep_alive)
         self._key_to_tag[key] = record.ref.full_tag
         return lease, manifest, record, key

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import typer
 from rich.console import Console
-from rich.table import Table
 
 from forgeai.cli.commands.ls import format_size
 from forgeai.cli.runtime import DaemonClient, DaemonClientError, handle_cli_error
@@ -20,6 +19,7 @@ def ps(
     host: str | None = typer.Option(None, "--host", help="Daemon host"),
     port: int | None = typer.Option(None, "--port", help="Daemon port"),
 ) -> None:
+    from rich.table import Table
     try:
         client = DaemonClient(host=host, port=port)
         data = client.request("GET", "/api/ps")

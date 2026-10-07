@@ -11,7 +11,6 @@ from pathlib import Path
 import typer
 from rich.console import Console
 from rich.markup import escape
-from rich.table import Table
 
 console = Console()
 app = typer.Typer(invoke_without_command=True)
@@ -115,6 +114,8 @@ def benchmark(
     ),
 ) -> None:
     """TurboQuant performance benchmarking and compute evaluation harness."""
+    from rich.table import Table
+
     from forgeai.core.telemetry import track_event
 
     resolved = model

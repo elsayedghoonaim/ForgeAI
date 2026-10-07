@@ -9,7 +9,6 @@ from collections.abc import Generator
 from dataclasses import dataclass
 from typing import Any, NoReturn
 
-import httpx
 import typer
 from rich.console import Console
 
@@ -120,7 +119,19 @@ class DaemonClient:
         timeout: float = 30.0,
     ) -> None:
         self.base_url = resolve_base_url(host=host, port=port, base_url=base_url)
-        self.timeout = httpx.Timeout(connect=5.0, read=timeout, write=timeout, pool=5.0)
+        self._timeout_seconds = timeout
+
+    @property
+    def timeout(self) -> Any:
+        """httpx.Timeout for this client (httpx is imported lazily to keep CLI startup fast)."""
+        import httpx
+
+        return httpx.Timeout(
+            connect=5.0,
+            read=self._timeout_seconds,
+            write=self._timeout_seconds,
+            pool=5.0,
+        )
 
     def request(
         self,
@@ -130,6 +141,8 @@ class DaemonClient:
         params: Any = None,
     ) -> dict[str, Any]:
         """Make an ordinary JSON HTTP request and return parsed JSON."""
+        import httpx
+
         url = f"{self.base_url}{path if path.startswith('/') else '/' + path}"
         try:
             with httpx.Client(timeout=self.timeout) as client:
@@ -165,6 +178,8 @@ class DaemonClient:
         params: Any = None,
     ) -> Generator[dict[str, Any], None, None]:
         """Stream NDJSON response line-by-line without buffering the whole response."""
+        import httpx
+
         url = f"{self.base_url}{path if path.startswith('/') else '/' + path}"
         try:
             with (

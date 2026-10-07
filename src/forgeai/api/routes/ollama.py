@@ -131,7 +131,9 @@ async def generate(request: Request, body: OllamaGenerateRequest) -> Response:
     )
     if is_stop_shape:
         try:
-            key, manifest, record = runtime.get_engine_key_for_tag(body.model)
+            key, manifest, record = await asyncio.to_thread(
+                runtime.get_engine_key_for_tag, body.model
+            )
         except (KeyError, ValueError):
             return JSONResponse(
                 status_code=404,
@@ -468,12 +470,16 @@ async def embed(request: Request, body: OllamaEmbedRequest) -> Response:
 async def list_tags(request: Request) -> Response:
     """Ollama-compatible /api/tags endpoint."""
     runtime = _get_runtime_adapter(request)
-    records = runtime.model_registry.list_records(cache_manager=runtime.cache_manager)
+    records = await asyncio.to_thread(
+        runtime.model_registry.list_records, cache_manager=runtime.cache_manager, include_size=True
+    )
 
     models_list = []
     for record in records:
         try:
-            manifest = runtime.model_registry.get_manifest(record.ref.full_tag)
+            manifest = record.manifest
+            if manifest is None:
+                raise ValueError("record has no manifest")
             weight_quant = manifest.engine_settings.weight_quantization
             kv_dtype = manifest.kv_cache.dtype
         except Exception:
@@ -525,7 +531,12 @@ async def list_running(request: Request) -> Response:
 
         public_tag = runtime.get_public_tag_for_key(st.key)
         try:
-            record = runtime.model_registry.get_record(public_tag, cache_manager=runtime.cache_manager)
+            record = await asyncio.to_thread(
+                runtime.model_registry.get_record,
+                public_tag,
+                cache_manager=runtime.cache_manager,
+                include_size=True,
+            )
             size = record.size_bytes
             digest = record.ref.digest
         except Exception:
@@ -561,7 +572,7 @@ async def show_model(request: Request, body: OllamaShowRequest) -> Response:
     runtime = _get_runtime_adapter(request)
     try:
         model_name = body.model_name
-        manifest, record = runtime.get_manifest_and_record(model_name)
+        manifest, record = await asyncio.to_thread(runtime.get_manifest_and_record, model_name)
     except (ValueError, KeyError):
         return JSONResponse(
             status_code=404,
@@ -629,7 +640,9 @@ async def pull_model(request: Request, body: OllamaPullRequest) -> Response:
     # Save existing manifest if present to preserve atomic state on registration failure
     existing_manifest = None
     with suppress(Exception):
-        existing_manifest = runtime.model_registry.get_manifest(public_tag)
+        existing_manifest = await asyncio.to_thread(
+            runtime.model_registry.get_manifest, public_tag
+        )
 
     if body.stream:
         async def _stream_pull():
@@ -656,15 +669,19 @@ async def pull_model(request: Request, body: OllamaPullRequest) -> Response:
                     model=repo_id,
                     source_kind="huggingface",
                 )
-                record = runtime.model_registry.register_manifest(
-                    manifest, cache_manager=runtime.cache_manager
+                record = await asyncio.to_thread(
+                    runtime.model_registry.register_manifest,
+                    manifest,
+                    cache_manager=runtime.cache_manager,
                 )
                 yield json.dumps({"status": "success", "digest": record.ref.digest}) + "\n"
             except Exception as err:
                 if existing_manifest is not None:
                     with suppress(Exception):
-                        runtime.model_registry.register_manifest(
-                            existing_manifest, cache_manager=runtime.cache_manager
+                        await asyncio.to_thread(
+                            runtime.model_registry.register_manifest,
+                            existing_manifest,
+                            cache_manager=runtime.cache_manager,
                         )
                 yield json.dumps({"error": f"Manifest registration failed: {err}"}) + "\n"
 
@@ -682,15 +699,19 @@ async def pull_model(request: Request, body: OllamaPullRequest) -> Response:
             model=repo_id,
             source_kind="huggingface",
         )
-        record = runtime.model_registry.register_manifest(
-            manifest, cache_manager=runtime.cache_manager
+        record = await asyncio.to_thread(
+            runtime.model_registry.register_manifest,
+            manifest,
+            cache_manager=runtime.cache_manager,
         )
         return JSONResponse(content={"status": "success", "digest": record.ref.digest})
     except Exception as err:
         if existing_manifest is not None:
             with suppress(Exception):
-                runtime.model_registry.register_manifest(
-                    existing_manifest, cache_manager=runtime.cache_manager
+                await asyncio.to_thread(
+                    runtime.model_registry.register_manifest,
+                    existing_manifest,
+                    cache_manager=runtime.cache_manager,
                 )
         return JSONResponse(status_code=500, content={"error": f"Pull failed: {err}"})
 
@@ -701,7 +722,9 @@ async def delete_model(request: Request, body: OllamaDeleteRequest) -> Response:
     runtime = _get_runtime_adapter(request)
     try:
         model_name = body.model_name
-        key, manifest, record = runtime.get_engine_key_for_tag(model_name)
+        key, manifest, record = await asyncio.to_thread(
+            runtime.get_engine_key_for_tag, model_name
+        )
     except (ValueError, KeyError):
         return JSONResponse(
             status_code=404,
@@ -710,7 +733,11 @@ async def delete_model(request: Request, body: OllamaDeleteRequest) -> Response:
 
     # Call stop() with the exact EngineKey built for that record, then unregister after stop completes
     await runtime.engine_manager.stop(key)
-    runtime.model_registry.unregister_tag(record.ref.full_tag, cache_manager=runtime.cache_manager)
+    await asyncio.to_thread(
+        runtime.model_registry.unregister_tag,
+        record.ref.full_tag,
+        cache_manager=runtime.cache_manager,
+    )
 
     return JSONResponse(content={})
 

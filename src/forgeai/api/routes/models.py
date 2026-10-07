@@ -4,6 +4,7 @@ Model listing and management endpoints.
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 from fastapi import APIRouter, Request
@@ -33,7 +34,9 @@ async def list_models(request: Request) -> ModelListResponse:
     models = []
     if registry is not None:
         cache_manager = getattr(request.app.state, "cache_manager", None) or (runtime.cache_manager if runtime else None)
-        records = registry.list_records(cache_manager=cache_manager)
+        records = await asyncio.to_thread(
+            registry.list_records, cache_manager=cache_manager, include_size=False
+        )
         now_ts = int(time.time())
         for r in records:
             models.append(ModelData(id=r.ref.full_tag, created=now_ts))
@@ -56,7 +59,9 @@ async def get_model(model_id: str, request: Request) -> ModelData:
     if registry is not None:
         cache_manager = getattr(request.app.state, "cache_manager", None) or (runtime.cache_manager if runtime else None)
         try:
-            record = registry.get_record(model_id, cache_manager=cache_manager)
+            record = await asyncio.to_thread(
+                registry.get_record, model_id, cache_manager=cache_manager
+            )
             return ModelData(id=record.ref.full_tag, created=int(time.time()))
         except KeyError:
             pass

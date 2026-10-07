@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 import shutil
 import threading
@@ -12,10 +11,6 @@ from typing import Any
 import typer
 from rich.console import Console
 from rich.markup import escape
-from rich.panel import Panel
-from rich.prompt import Prompt
-
-from forgeai.core.backends.base import StreamStats, iter_stream
 
 console = Console()
 SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
@@ -120,6 +115,9 @@ def _print_startup_profile(
 
 async def _read_user_input() -> str:
     """Prompt for user input without breaking the streaming event loop."""
+    import asyncio
+
+    from rich.prompt import Prompt
 
     return (await asyncio.to_thread(Prompt.ask, "[bold blue]You[/bold blue]")).strip()
 
@@ -134,6 +132,8 @@ async def _stream_chat_session(
     top_p: float,
 ) -> None:
     """Run the interactive chat loop with incremental token streaming."""
+    from forgeai.core.backends.base import StreamStats, iter_stream
+
 
     while True:
         try:
@@ -210,6 +210,10 @@ def chat(
     startup_logs: bool = typer.Option(False, "--startup-logs", help="Show raw vLLM/HF startup logs"),
 ) -> None:
     """Start an interactive chat session in the terminal."""
+    import asyncio
+
+    from rich.panel import Panel
+    from rich.prompt import Prompt
 
     from forgeai.cli.runtime import print_runtime_tuning, resolve_runtime_tuning
     from forgeai.core.config import DevToolSettings

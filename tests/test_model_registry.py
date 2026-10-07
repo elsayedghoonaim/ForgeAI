@@ -13,7 +13,7 @@ from unittest.mock import patch
 import pytest
 from pydantic import ValidationError
 
-from forgeai.models.loader import CacheManager, download_model
+from forgeai.models.loader import DOWNLOAD_ALLOW_PATTERNS, CacheManager, download_model
 from forgeai.models.manifest import (
     EngineSettings,
     ForgeAIManifest,
@@ -313,7 +313,7 @@ class TestCacheManager:
                 cache_dir=str(cache_mgr.hf_home),
                 revision="v1.0",
                 token=None,
-                ignore_patterns=["*.md", "*.txt", "LICENSE*", ".git*"],
+                allow_patterns=DOWNLOAD_ALLOW_PATTERNS,
             )
 
     def test_download_model_legacy_cache_dir_forwarding(self, tmp_path: Path) -> None:

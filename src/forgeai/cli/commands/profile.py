@@ -8,7 +8,6 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
-from rich.table import Table
 
 console = Console()
 app = typer.Typer()
@@ -98,6 +97,8 @@ def load_profile(
 @app.command("list")
 def list_profiles() -> None:
     """List all saved deployment profiles."""
+    from rich.table import Table
+
     from forgeai.core.config import DevToolSettings
 
     settings = DevToolSettings()

@@ -12,6 +12,7 @@ import hashlib
 import os
 import re
 import tempfile
+import threading
 import urllib.parse
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -51,6 +52,7 @@ class ModelRecord:
     manifest_path: str
     snapshot_path: str
     size_bytes: int
+    manifest: ForgeAIManifest | None = None
 
 
 def parse_tag(tag_str: str) -> tuple[str, str]:
@@ -100,9 +102,39 @@ def validate_tag_string(tag: str) -> None:
             raise ValueError(f"Invalid characters in tag name component: {tag!r}")
 
 
+_FileKey = tuple[int, int]  # (st_mtime_ns, st_size)
+
+
+@dataclass
+class _ManifestEntry:
+    """Parsed manifest plus its digest, valid for one (mtime_ns, size) of the file."""
+
+    file_key: _FileKey
+    manifest: ForgeAIManifest
+    digest: str
+
+
+def _dir_size(path: Path) -> int:
+    """Total size of the files below ``path`` (symlinks to files are followed)."""
+    total = 0
+    for f in path.rglob("*"):
+        try:
+            if f.is_file():
+                total += f.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
 class ModelRegistry:
     """
     Catalog of model manifests stored in YAML format under ${FORGEAI_HOME}/manifests.
+
+    Parsed manifests, digests and resolved snapshot paths are cached per manifest file,
+    keyed by ``(path, mtime_ns, size)``, so request handling does not re-read YAML or
+    re-scan snapshot directories. Snapshot sizes are computed lazily (listing endpoints
+    only) and cached per snapshot path. All caches are invalidated by
+    ``register_manifest``, ``unregister_tag`` and ``invalidate``.
     """
 
     def __init__(self, manifests_dir: str | Path | None = None) -> None:
@@ -115,6 +147,47 @@ class ModelRegistry:
             self.manifests_dir = forgeai_home / "manifests"
 
         self.manifests_dir.mkdir(parents=True, exist_ok=True)
+
+        self._lock = threading.RLock()
+        self._entries: dict[Path, _ManifestEntry] = {}
+        self._snapshots: dict[tuple[Path, _FileKey, str], str] = {}
+        self._sizes: dict[str, tuple[int, int]] = {}  # snapshot path -> (dir mtime_ns, size)
+
+    # ------------------------------------------------------------------ caches
+
+    def invalidate(self, path: Path | None = None) -> None:
+        """Drop cached state for one manifest path, or for everything."""
+        with self._lock:
+            if path is None:
+                self._entries.clear()
+                self._snapshots.clear()
+                self._sizes.clear()
+                return
+            self._entries.pop(path, None)
+            for key in [k for k in self._snapshots if k[0] == path]:
+                del self._snapshots[key]
+            # Sizes are keyed by snapshot path (shared across tags); drop them all, they
+            # are cheap to recompute and only ever needed by listing endpoints.
+            self._sizes.clear()
+
+    def _load_entry(self, path: Path) -> _ManifestEntry:
+        """Return the parsed manifest for ``path``, re-reading only if the file changed."""
+        st = path.stat()  # FileNotFoundError propagates to callers
+        file_key = (st.st_mtime_ns, st.st_size)
+        with self._lock:
+            cached = self._entries.get(path)
+            if cached is not None and cached.file_key == file_key:
+                return cached
+
+        content = path.read_text(encoding="utf-8")
+        manifest = ForgeAIManifest.from_yaml(content)
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        entry = _ManifestEntry(file_key=file_key, manifest=manifest, digest=digest)
+        with self._lock:
+            self._entries[path] = entry
+        return entry
+
+    # ------------------------------------------------------------------ paths
 
     def _tag_to_filename(self, tag: str) -> str:
         """Convert a model tag to a safe, deterministic, URL-quoted filename."""
@@ -132,23 +205,31 @@ class ModelRegistry:
             raise ValueError(f"Path traversal detected for tag: {tag!r}") from err
         return path
 
-    def get_manifest(self, tag: str) -> ForgeAIManifest:
-        """Load and return ForgeAIManifest for tag."""
+    def _find_manifest_path(self, tag: str) -> Path:
         path = self._get_manifest_path(tag)
         if not path.exists() and ":" not in tag:
             path = self._get_manifest_path(f"{tag}:latest")
-
         if not path.exists():
             raise KeyError(f"Model manifest not found for tag: {tag!r}")
+        return path
 
-        yaml_content = path.read_text(encoding="utf-8")
-        manifest: ForgeAIManifest = ForgeAIManifest.from_yaml(yaml_content)
-        return manifest
+    # -------------------------------------------------------------------- API
+
+    def get_manifest(self, tag: str) -> ForgeAIManifest:
+        """Load and return ForgeAIManifest for tag (a private copy of the cached one)."""
+        path = self._find_manifest_path(tag)
+        try:
+            entry = self._load_entry(path)
+        except FileNotFoundError as err:
+            raise KeyError(f"Model manifest not found for tag: {tag!r}") from err
+        return entry.manifest.model_copy(deep=True)
 
     def register_manifest(
         self,
         manifest: ForgeAIManifest,
         cache_manager: CacheManager | None = None,
+        *,
+        include_size: bool = False,
     ) -> ModelRecord:
         """
         Deterministically serialize and atomically publish a manifest.
@@ -178,9 +259,21 @@ class ModelRegistry:
                 with suppress(Exception):
                     os.remove(temp_path)
             raise
+        finally:
+            self.invalidate(target_path)
+
+        # Seed the cache with what was just written so the next request does not re-parse.
+        with suppress(OSError):
+            st = target_path.stat()
+            with self._lock:
+                self._entries[target_path] = _ManifestEntry(
+                    file_key=(st.st_mtime_ns, st.st_size),
+                    manifest=manifest.model_copy(deep=True),
+                    digest=digest,
+                )
 
         snapshot_path, size_bytes = self._resolve_snapshot_info(
-            manifest, cache_manager=cache_manager
+            target_path, manifest, cache_manager=cache_manager, include_size=include_size
         )
         name_part, tag_part = parse_tag(tag)
         ref = ModelRef(name=name_part, tag=tag_part, digest=digest)
@@ -190,6 +283,7 @@ class ModelRegistry:
             manifest_path=str(target_path),
             snapshot_path=str(snapshot_path),
             size_bytes=size_bytes,
+            manifest=manifest.model_copy(deep=True),
         )
 
     def unregister_tag(
@@ -201,94 +295,155 @@ class ModelRegistry:
         try:
             record = self.get_record(tag, cache_manager=cache_manager)
             path = Path(record.manifest_path)
-            if path.exists():
-                path.unlink()
+            try:
+                if path.exists():
+                    path.unlink()
+            finally:
+                self.invalidate(path)
             return record
         except KeyError:
             return None
 
-    def get_record(self, tag: str, cache_manager: CacheManager | None = None) -> ModelRecord:
-        """Get ModelRecord for a specific tag."""
-        manifest = self.get_manifest(tag)
-        path = self._get_manifest_path(tag)
-        if not path.exists() and ":" not in tag:
-            path = self._get_manifest_path(f"{tag}:latest")
-        yaml_content = path.read_text(encoding="utf-8")
-        digest = hashlib.sha256(yaml_content.encode("utf-8")).hexdigest()
+    def get_record(
+        self,
+        tag: str,
+        cache_manager: CacheManager | None = None,
+        *,
+        include_size: bool = False,
+    ) -> ModelRecord:
+        """Get ModelRecord (including the parsed manifest) for a specific tag.
 
-        snapshot_path, size_bytes = self._resolve_snapshot_info(
-            manifest, cache_manager=cache_manager
-        )
-        name_part, tag_part = parse_tag(manifest.name)
-        ref = ModelRef(name=name_part, tag=tag_part, digest=digest)
+        ``size_bytes`` is 0 unless ``include_size`` is set; only listing endpoints need it.
+        """
+        path = self._find_manifest_path(tag)
+        try:
+            entry = self._load_entry(path)
+        except FileNotFoundError as err:
+            raise KeyError(f"Model manifest not found for tag: {tag!r}") from err
+        return self._build_record(path, entry, cache_manager, include_size)
 
-        return ModelRecord(
-            ref=ref,
-            manifest_path=str(path),
-            snapshot_path=str(snapshot_path),
-            size_bytes=size_bytes,
-        )
-
-    def list_records(self, cache_manager: CacheManager | None = None) -> list[ModelRecord]:
+    def list_records(
+        self,
+        cache_manager: CacheManager | None = None,
+        *,
+        include_size: bool = True,
+    ) -> list[ModelRecord]:
         """List records for all registered model manifests."""
         records: list[ModelRecord] = []
         if not self.manifests_dir.exists():
             return records
 
+        seen: set[Path] = set()
         for yaml_file in sorted(self.manifests_dir.glob("*.yaml")):
+            seen.add(yaml_file)
             try:
-                content = yaml_file.read_text(encoding="utf-8")
-                manifest = ForgeAIManifest.from_yaml(content)
-                digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-                snapshot_path, size_bytes = self._resolve_snapshot_info(
-                    manifest, cache_manager=cache_manager
-                )
-                name_part, tag_part = parse_tag(manifest.name)
-                ref = ModelRef(name=name_part, tag=tag_part, digest=digest)
-                records.append(
-                    ModelRecord(
-                        ref=ref,
-                        manifest_path=str(yaml_file),
-                        snapshot_path=str(snapshot_path),
-                        size_bytes=size_bytes,
-                    )
-                )
+                entry = self._load_entry(yaml_file)
+                records.append(self._build_record(yaml_file, entry, cache_manager, include_size))
             except Exception:
                 continue
 
+        with self._lock:
+            for stale in [p for p in self._entries if p not in seen]:
+                self._entries.pop(stale, None)
         return records
+
+    def _build_record(
+        self,
+        path: Path,
+        entry: _ManifestEntry,
+        cache_manager: CacheManager | None,
+        include_size: bool,
+    ) -> ModelRecord:
+        manifest = entry.manifest
+        snapshot_path, size_bytes = self._resolve_snapshot_info(
+            path, manifest, cache_manager=cache_manager, include_size=include_size
+        )
+        name_part, tag_part = parse_tag(manifest.name)
+        ref = ModelRef(name=name_part, tag=tag_part, digest=entry.digest)
+        return ModelRecord(
+            ref=ref,
+            manifest_path=str(path),
+            snapshot_path=str(snapshot_path),
+            size_bytes=size_bytes,
+            manifest=manifest.model_copy(deep=True),
+        )
+
+    def _snapshot_size(self, snapshot_path: str) -> int:
+        """Lazily compute and cache the size of a snapshot directory."""
+        try:
+            dir_mtime = os.stat(snapshot_path).st_mtime_ns
+        except OSError:
+            return 0
+        with self._lock:
+            cached = self._sizes.get(snapshot_path)
+            if cached is not None and cached[0] == dir_mtime:
+                return cached[1]
+        size = _dir_size(Path(snapshot_path))
+        with self._lock:
+            self._sizes[snapshot_path] = (dir_mtime, size)
+        return size
 
     def _resolve_snapshot_info(
         self,
+        manifest_path: Path,
         manifest: ForgeAIManifest,
         cache_manager: CacheManager | None = None,
+        include_size: bool = False,
     ) -> tuple[str, int]:
-        """Resolve model snapshot directory path and size in bytes."""
+        """Resolve the model snapshot directory path and (optionally) its size in bytes."""
+        try:
+            st = manifest_path.stat()
+            file_key: _FileKey = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            file_key = (0, 0)
+
         if manifest.source_kind == "local_dir":
             local_path = Path(manifest.model).resolve()
             if local_path.exists():
-                size = sum(f.stat().st_size for f in local_path.rglob("*") if f.is_file())
+                size = self._snapshot_size(str(local_path)) if include_size else 0
                 return str(local_path), size
             return manifest.model, 0
 
         # source_kind == "huggingface"
-        if cache_manager is not None:
-            snap_path = cache_manager.get_snapshot_path(manifest.model, manifest.revision)
-            if snap_path and snap_path.exists():
-                size = sum(f.stat().st_size for f in snap_path.rglob("*") if f.is_file())
-                return str(snap_path), size
-            hub_path = cache_manager.hub_dir / f"models--{manifest.model.replace('/', '--')}"
-            return str(hub_path), 0
-
-        forgeai_home = Path(
-            os.environ.get("FORGEAI_HOME", os.path.expanduser("~/.forgeai"))
-        ).expanduser().resolve()
         hub_dir = (
-            Path(os.environ.get("HF_HOME", str(forgeai_home / "hf"))).expanduser().resolve()
+            cache_manager.hub_dir
+            if cache_manager is not None
+            else Path(
+                os.environ.get(
+                    "HF_HOME",
+                    str(
+                        Path(os.environ.get("FORGEAI_HOME", os.path.expanduser("~/.forgeai")))
+                        .expanduser()
+                        .resolve()
+                        / "hf"
+                    ),
+                )
+            )
+            .expanduser()
+            .resolve()
             / "hub"
         )
-        model_dir = hub_dir / f"models--{manifest.model.replace('/', '--')}"
-        return str(model_dir), 0
+        hub_path = hub_dir / f"models--{manifest.model.replace('/', '--')}"
+
+        if cache_manager is None:
+            return str(hub_path), 0
+
+        cache_key = (manifest_path, file_key, str(hub_dir))
+        with self._lock:
+            cached_snap = self._snapshots.get(cache_key)
+        if cached_snap is not None and os.path.isdir(cached_snap):
+            snap_str = cached_snap
+        else:
+            snap_path = cache_manager.get_snapshot_path(manifest.model, manifest.revision)
+            if not (snap_path and snap_path.exists()):
+                with self._lock:
+                    self._snapshots.pop(cache_key, None)
+                return str(hub_path), 0
+            snap_str = str(snap_path)
+            with self._lock:
+                self._snapshots[cache_key] = snap_str
+        size = self._snapshot_size(snap_str) if include_size else 0
+        return snap_str, size
 
 
 @dataclass

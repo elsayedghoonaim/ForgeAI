@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import stat
 import sys
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -19,6 +20,21 @@ from forgeai.models.manifest import validate_repo_id_string
 from forgeai.utils.helpers import format_bytes
 
 console = Console()
+
+# Only fetch what the vLLM engine needs. Excluding ``*.bin`` / ``*.pt`` keeps repos that ship
+# both pickle and safetensors weights from downloading everything twice (and from tripping
+# the pickle scanner). ``*.txt`` is required for merges.txt / vocab.txt.
+DOWNLOAD_ALLOW_PATTERNS: list[str] = [
+    "*.safetensors",
+    "*.json",
+    "tokenizer*",
+    "*.model",
+    "*.tiktoken",
+    "*.txt",
+    "chat_template*",
+    "*.jinja",
+    "*.py",  # custom modelling code, only executed when trust_remote_code is enabled
+]
 
 
 def _is_valid_repo_id(repo_id: str) -> bool:
@@ -166,7 +182,7 @@ class CacheManager:
                 cache_dir=str(self.hf_home),
                 revision=revision,
                 token=token,
-                ignore_patterns=["*.md", "*.txt", "LICENSE*", ".git*"],
+                allow_patterns=DOWNLOAD_ALLOW_PATTERNS,
             )
 
             return str(local_path)
@@ -271,7 +287,39 @@ class CacheManager:
                 except Exception:
                     pass
 
+            self._prune_unreferenced_blobs(model_dir)
+
         return removed_count
+
+    @staticmethod
+    def _prune_unreferenced_blobs(model_dir: Path) -> int:
+        """Delete blobs in ``model_dir/blobs`` that no remaining snapshot links to."""
+        blobs_dir = model_dir / "blobs"
+        snapshots_dir = model_dir / "snapshots"
+        if not blobs_dir.is_dir() or blobs_dir.is_symlink() or not snapshots_dir.is_dir():
+            return 0
+
+        blobs_resolved = blobs_dir.resolve()
+        referenced: set[Path] = set()
+        for root, _dirs, files in os.walk(snapshots_dir, followlinks=False):
+            for name in files:
+                try:
+                    referenced.add(Path(os.path.realpath(os.path.join(root, name))))
+                except OSError:
+                    continue
+
+        removed = 0
+        for blob in blobs_resolved.iterdir():
+            if blob.is_symlink() or not blob.is_file() or blob.name.endswith(".incomplete"):
+                continue
+            if blob.resolve() in referenced:
+                continue
+            try:
+                blob.unlink()
+                removed += 1
+            except OSError:
+                pass
+        return removed
 
 
 def download_model(
@@ -348,6 +396,31 @@ def download_model(
     return local_path
 
 
+def _dir_size_no_follow(root: Path) -> int:
+    """Sum file sizes under ``root`` without following symlinks.
+
+    HF caches store each file once in ``blobs/`` and expose it through symlinks in
+    ``snapshots/``; following links would count every blob once per snapshot. Hard-linked
+    files are counted once via (st_dev, st_ino).
+    """
+    total = 0
+    seen: set[tuple[int, int]] = set()
+    for dirpath, _dirs, files in os.walk(root, followlinks=False):
+        for name in files:
+            try:
+                st = os.lstat(os.path.join(dirpath, name))
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            ident = (st.st_dev, st.st_ino)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            total += st.st_size
+    return total
+
+
 def get_cached_models(cache_dir: str | None = None) -> list[dict[str, str]]:
     """List all locally cached models in HuggingFace hub."""
     if cache_dir:
@@ -364,7 +437,7 @@ def get_cached_models(cache_dir: str | None = None) -> list[dict[str, str]]:
         if entry.is_dir() and entry.name.startswith("models--"):
             parts = entry.name.replace("models--", "").split("--")
             repo_id = f"{parts[0]}/{parts[1]}" if len(parts) >= 2 else parts[0]
-            total_size = sum(f.stat().st_size for f in entry.rglob("*") if f.is_file())
+            total_size = _dir_size_no_follow(entry)
 
             models.append({
                 "repo_id": repo_id,

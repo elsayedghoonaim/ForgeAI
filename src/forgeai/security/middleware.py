@@ -8,10 +8,9 @@ import time
 from collections import deque
 from uuid import uuid4
 
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 PUBLIC_PATHS = {"/healthz", "/readyz", "/docs", "/redoc", "/openapi.json"}
 RATE_LIMIT_EXEMPT_PATHS = {"/healthz", "/readyz"}
@@ -141,11 +140,15 @@ class _DeniedAuditThrottle:
         return True
 
 
-class AuthMiddleware(BaseHTTPMiddleware):
-    """Middleware that enforces authentication and authorization."""
+class AuthMiddleware:
+    """Pure-ASGI middleware that enforces authentication and authorization.
+
+    Responses are streamed straight through (no body buffering, no extra task), and the
+    access audit event is written once the response status is known.
+    """
 
     def __init__(self, app: ASGIApp) -> None:
-        super().__init__(app)
+        self.app = app
         self._denied_throttle = _DeniedAuditThrottle()
 
     def _audit_denied_auth(self, request: Request, reason: str, request_id: str) -> None:
@@ -162,14 +165,48 @@ class AuthMiddleware(BaseHTTPMiddleware):
             details={"reason": reason, "request_id": request_id, "client_ip": ip},
         )
 
-    async def dispatch(self, request: Request, call_next):
-        request_id, header_name = _request_id(request)
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope)
+        request_id, _header_name = _request_id(request)
 
         if request.url.path in PUBLIC_PATHS or request.method == "OPTIONS":
-            response = await call_next(request)
-            response.headers.setdefault(header_name, request_id)
-            return response
+            await self.app(scope, receive, send)
+            return
 
+        denial = self._authenticate(request, request_id)
+        if denial is not None:
+            await denial(scope, receive, send)
+            return
+
+        actor_id = request.state.actor_id
+        required_permission = request.state.required_permission
+
+        async def audit_send(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                status_code = int(message["status"])
+                _audit(
+                    request,
+                    event_type="access",
+                    actor=actor_id,
+                    action=request.method,
+                    resource=request.url.path,
+                    outcome="success" if status_code < 400 else "failure",
+                    details={
+                        "permission": required_permission,
+                        "request_id": request_id,
+                        "status_code": status_code,
+                    },
+                )
+            await send(message)
+
+        await self.app(scope, receive, audit_send)
+
+    def _authenticate(self, request: Request, request_id: str) -> JSONResponse | None:
+        """Return an error response if the request is not allowed, else None."""
         auth_header = request.headers.get("Authorization", "")
         api_key = request.headers.get("X-API-Key", "")
         if not auth_header and not api_key:
@@ -236,24 +273,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 403,
                 f"Permission '{required_permission}' is required for this resource.",
             )
-
-        response = await call_next(request)
-        response.headers.setdefault(header_name, request_id)
-
-        _audit(
-            request,
-            event_type="access",
-            actor=actor_id,
-            action=request.method,
-            resource=request.url.path,
-            outcome="success" if response.status_code < 400 else "failure",
-            details={
-                "permission": required_permission,
-                "request_id": request_id,
-                "status_code": response.status_code,
-            },
-        )
-        return response
+        return None
 
 
 class RateLimitMiddleware:
@@ -300,12 +320,14 @@ class RateLimitMiddleware:
 
         settings = getattr(getattr(app, "state", None), "settings", None)
         header_name = getattr(settings, "request_id_header", "X-Request-ID")
-        raw_id = None
-        for name, value in scope.get("headers", []):
-            if name.decode("latin-1").lower() == header_name.lower():
-                raw_id = value.decode("latin-1")
-                break
-        request_id = sanitize_request_id(raw_id)
+        request_id = (scope.get("state") or {}).get("request_id")
+        if not request_id:
+            raw_id = None
+            for name, value in scope.get("headers", []):
+                if name.decode("latin-1").lower() == header_name.lower():
+                    raw_id = value.decode("latin-1")
+                    break
+            request_id = sanitize_request_id(raw_id)
         if path.startswith("/api/"):
             payload: dict[str, object] = {"error": "Rate limit exceeded."}
         else:

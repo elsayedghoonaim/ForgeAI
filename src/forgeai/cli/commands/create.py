@@ -7,12 +7,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import typer
-import yaml
 from rich.console import Console
 
 from forgeai.cli.runtime import handle_cli_error
-from forgeai.models.manifest import ForgeAIManifest
-from forgeai.models.registry import ModelRegistry
 
 console = Console()
 app = typer.Typer(invoke_without_command=True)
@@ -49,6 +46,11 @@ def create(
     ),
 ) -> None:
     """Create and register a local model tag from a ForgeAI YAML manifest."""
+    import yaml
+
+    from forgeai.models.manifest import ForgeAIManifest
+    from forgeai.models.registry import ModelRegistry
+
     try:
         content = file.read_text(encoding="utf-8")
     except Exception as err:

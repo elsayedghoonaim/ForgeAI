@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
@@ -12,7 +11,9 @@ from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from forgeai import __version__
 from forgeai.api.routes import chat, health, models, ollama
@@ -69,6 +70,103 @@ def _error_response(
         headers=merged_headers,
         content=payload,
     )
+
+
+class RequestLoggingMiddleware:
+    """Pure-ASGI request-id, access-log and metrics middleware.
+
+    Unlike ``BaseHTTPMiddleware`` it does not wrap the response in a second task or stream,
+    so client disconnects reach the application and per-chunk overhead is nil. Metrics,
+    latency and the access log are finalized exactly once: when the final body message
+    (``more_body`` false) is sent, when the client disconnects, or when the app raises or
+    returns, whichever happens first. ``ACTIVE_REQUESTS`` is decremented at that point.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        app = scope.get("app")
+        settings = getattr(getattr(app, "state", None), "settings", None)
+        header_name = getattr(settings, "request_id_header", "X-Request-ID")
+
+        raw_id: str | None = None
+        wanted = header_name.lower().encode("latin-1")
+        for name, value in scope.get("headers", []):
+            if name.lower() == wanted:
+                raw_id = value.decode("latin-1")
+                break
+        request_id = sanitize_request_id(raw_id)
+
+        client = scope.get("client")
+        client_ip = client[0] if client else "unknown"
+        state = scope.setdefault("state", {})
+        state["request_id"] = request_id
+        state["client_ip"] = client_ip
+
+        method = scope.get("method", "")
+        path = scope.get("path", "")
+        start = time.monotonic()
+        status_code = 0
+        finalized = False
+        ACTIVE_REQUESTS.inc()
+
+        def finalize(status_override: int | None = None) -> None:
+            nonlocal finalized
+            if finalized:
+                return
+            finalized = True
+            ACTIVE_REQUESTS.dec()
+            status = status_override if status_override is not None else status_code
+            elapsed = time.monotonic() - start
+            try:
+                record_request(
+                    method=method,
+                    status=str(status),
+                    duration=elapsed,
+                    tokens=state.get("completion_tokens", 0),
+                    prompt_tokens=state.get("prompt_tokens", 0),
+                )
+                logger.info(
+                    "request",
+                    method=method,
+                    path=path,
+                    status=status,
+                    duration_ms=round(elapsed * 1000, 1),
+                    request_id=request_id,
+                    actor=state.get("actor_id"),
+                    permission=state.get("required_permission"),
+                    client_ip=client_ip,
+                )
+            except Exception:  # never let observability break request handling
+                pass
+
+        async def receive_wrapper() -> Message:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                finalize(status_code or 499)
+            return message
+
+        async def send_wrapper(message: Message) -> None:
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = int(message["status"])
+                MutableHeaders(scope=message).setdefault(header_name, request_id)
+            await send(message)
+            if message["type"] == "http.response.body" and not message.get("more_body", False):
+                finalize()
+
+        try:
+            await self.app(scope, receive_wrapper, send_wrapper)
+        except BaseException:
+            finalize(status_code or 500)
+            raise
+        finally:
+            finalize(status_code or 500)
 
 
 def create_app(
@@ -219,51 +317,17 @@ def create_app(
             "internal_error",
         )
 
-    @app.middleware("http")
-    async def log_requests(
-        request: Request,
-        call_next: Callable[[Request], Awaitable[Response]],
-    ) -> Response:
-        request_id, header_name = _request_id(request, request.app)
-        request.state.client_ip = request.client.host if request.client else "unknown"
-
-        start = time.monotonic()
-        ACTIVE_REQUESTS.inc()
-        try:
-            response: Response = await call_next(request)
-            ACTIVE_REQUESTS.dec()
-            elapsed = time.monotonic() - start
-            response.headers.setdefault(header_name, request_id)
-            record_request(
-                method=request.method,
-                status=str(response.status_code),
-                duration=elapsed,
-                tokens=getattr(request.state, "completion_tokens", 0),
-                prompt_tokens=getattr(request.state, "prompt_tokens", 0),
-            )
-            logger.info(
-                "request",
-                method=request.method,
-                path=request.url.path,
-                status=response.status_code,
-                duration_ms=round(elapsed * 1000, 1),
-                request_id=request_id,
-                actor=getattr(request.state, "actor_id", None),
-                permission=getattr(request.state, "required_permission", None),
-                client_ip=request.state.client_ip,
-            )
-            return response
-        except Exception:
-            ACTIVE_REQUESTS.dec()
-            raise
-
-    # Middleware order (last added is outermost): CORS -> IP rate limit -> auth -> actor rate limit.
+    # Middleware order (the last one added is outermost):
+    #   CORS -> request id / logging / metrics -> IP rate limit -> auth -> actor rate limit.
+    # CORS wraps everything so 401/403/429 responses carry CORS headers, and the logging layer
+    # wraps the limiters and auth so those rejections are logged and counted too.
     app.add_middleware(RateLimitMiddleware, mode="actor")
     if enable_auth:
         from forgeai.security.middleware import AuthMiddleware
 
         app.add_middleware(AuthMiddleware)
     app.add_middleware(RateLimitMiddleware, mode="ip")
+    app.add_middleware(RequestLoggingMiddleware)
 
     cors_origins = list(getattr(settings, "cors_allow_origins", None) or [])
     if enable_cors and cors_origins:

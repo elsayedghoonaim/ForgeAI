@@ -71,6 +71,30 @@ def validate_repo_id_string(model_str: str) -> None:
             raise ValueError(f"{_REPO_ID_ERROR}: invalid characters: {model_str!r}")
 
 
+_SAFETENSORS_CACHE: dict[tuple[str, int], bool] = {}
+_SAFETENSORS_CACHE_MAX = 256
+
+
+def _has_safetensors(dir_path: Path) -> bool:
+    """Whether ``dir_path`` contains a ``*.safetensors`` file (positive results cached per mtime).
+
+    The recursive scan is skipped while the directory's mtime is unchanged. Only positive
+    results are cached so a directory that later gains weights is picked up immediately.
+    """
+    try:
+        key = (str(dir_path.resolve()), dir_path.stat().st_mtime_ns)
+    except OSError:
+        return any(dir_path.rglob("*.safetensors"))
+    if _SAFETENSORS_CACHE.get(key):
+        return True
+    found = any(dir_path.rglob("*.safetensors"))
+    if found:
+        if len(_SAFETENSORS_CACHE) >= _SAFETENSORS_CACHE_MAX:
+            _SAFETENSORS_CACHE.clear()
+        _SAFETENSORS_CACHE[key] = True
+    return found
+
+
 class GenerationDefaults(BaseModel):
     """Generation parameters for model inference."""
 
@@ -158,7 +182,7 @@ class ForgeAIManifest(BaseModel):
                     f"Local model directory missing required config.json: {model_str!r}"
                 )
 
-            if not any(dir_path.rglob("*.safetensors")):
+            if not _has_safetensors(dir_path):
                 raise ValueError(
                     f"Local model directory missing .safetensors file: {model_str!r}"
                 )

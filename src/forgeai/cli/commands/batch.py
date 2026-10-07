@@ -7,7 +7,6 @@ like feeding thousands of PDFs through an OCR model.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 from pathlib import Path
@@ -15,7 +14,6 @@ from pathlib import Path
 import typer
 from rich.console import Console
 from rich.markup import escape
-from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 console = Console()
 app = typer.Typer(invoke_without_command=True)
@@ -32,6 +30,10 @@ def batch(
     prompt_field: str = typer.Option("prompt", "--prompt-field", help="JSON field for prompt"),
 ) -> None:
     """High-throughput offline processing from JSONL files."""
+    import asyncio
+
+    from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+
     from forgeai.core.config import DevToolSettings
     from forgeai.core.telemetry import track_event
     from forgeai.models.zoo import resolve_model_name

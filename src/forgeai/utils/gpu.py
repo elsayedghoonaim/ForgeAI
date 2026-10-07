@@ -14,7 +14,6 @@ import platform
 from dataclasses import dataclass, field
 
 from rich.console import Console
-from rich.table import Table
 
 console = Console()
 
@@ -286,6 +285,7 @@ def _calculate_tp_size(topology: GPUTopology) -> int:
 
 def print_gpu_table(topology: GPUTopology) -> None:
     """Display GPU topology as a Rich table."""
+    from rich.table import Table
     if not topology.gpus:
         console.print("[yellow]No GPUs detected.[/yellow]")
         return

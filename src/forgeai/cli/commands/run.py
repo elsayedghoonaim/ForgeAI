@@ -8,7 +8,6 @@ import typer
 from rich.console import Console
 
 from forgeai.cli.runtime import DaemonClient, DaemonClientError, handle_cli_error
-from forgeai.core.telemetry import track_event
 
 console = Console()
 
@@ -51,6 +50,8 @@ def run(
         effective_num_predict = max_tokens
     else:
         effective_num_predict = None
+
+    from forgeai.core.telemetry import track_event
 
     track_event("command.run", {"model": model, "stream": stream, "has_prompt": effective_prompt is not None})
 
