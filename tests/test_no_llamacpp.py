@@ -194,7 +194,7 @@ def test_pyproject_toml_and_dockerfile_dependencies() -> None:
 def test_pyproject_toml_python_version_and_vllm_pinning() -> None:
     """
     Verify pyproject.toml requires Python >=3.12,<3.13 and requires every vLLM dependency
-    across all optional extras to be strictly 'vllm==0.30.0' with no extra markers or specifier variants,
+    across all optional extras to be strictly 'vllm==0.32.0' with no extra markers or specifier variants,
     and requires a single 'vllm' extra with exactly one such pin ('gpu' and 'all' alias it).
     """
     pyproject_path = REPO_ROOT / "pyproject.toml"
@@ -206,13 +206,13 @@ def test_pyproject_toml_python_version_and_vllm_pinning() -> None:
 
     opt_deps = project.get("optional-dependencies", {})
     required_vllm_extras = ["gpu", "vllm", "all"]
-    expected_vllm = "vllm==0.30.0"
+    expected_vllm = "vllm==0.32.0"
 
     # 1. 'vllm' extra holds exactly one pin; 'gpu' and 'all' are aliases of it
     for extra in required_vllm_extras:
         assert extra in opt_deps, f"Expected optional dependency extra '{extra}' in pyproject.toml"
     vllm_reqs = [dep for dep in opt_deps["vllm"] if _extract_package_name(dep) == "vllm"]
-    assert vllm_reqs == ["vllm==0.30.0"], f"Extra 'vllm' must pin exactly 'vllm==0.30.0', found {vllm_reqs}"
+    assert vllm_reqs == ["vllm==0.32.0"], f"Extra 'vllm' must pin exactly 'vllm==0.32.0', found {vllm_reqs}"
     for alias in ("gpu", "all"):
         assert opt_deps[alias] == ["forgeai[vllm]"], f"Extra '{alias}' must alias 'forgeai[vllm]'"
 

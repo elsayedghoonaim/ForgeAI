@@ -115,7 +115,7 @@ class VLLMBackend(BaseBackend):
             from vllm import LLM
         except ImportError as err:
             raise RuntimeError(
-                "vLLM is not installed. Install exact version with: pip install 'vllm==0.30.0'"
+                "vLLM is not installed. Install exact version with: pip install 'vllm==0.32.0'"
             ) from err
 
         kwargs = self.settings.to_vllm_kwargs()
@@ -131,8 +131,8 @@ class VLLMBackend(BaseBackend):
             from vllm.v1.engine.async_llm import AsyncLLM
         except ImportError as err:
             raise RuntimeError(
-                "Streaming requires vLLM 0.30.0 with AsyncLLM support. "
-                "Install exact version with: pip install 'vllm==0.30.0'"
+                "Streaming requires vLLM 0.32.0 with AsyncLLM support. "
+                "Install exact version with: pip install 'vllm==0.32.0'"
             ) from err
 
         engine_args_kwargs = self._build_async_engine_args_kwargs()

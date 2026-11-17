@@ -36,13 +36,20 @@ jobs:
         run: python -m pip check
 
       - name: Run pip-audit
-        # vLLM 0.30.0 currently requires setuptools<81, while
-        # PYSEC-2026-3447 is fixed in setuptools 83.0.0. The advisory affects
-        # MANIFEST.in matching when building source distributions on macOS,
-        # not ForgeAI runtime execution. ForgeAI's isolated build backend is
-        # separately pinned to patched setuptools>=83. Remove this exception
-        # once vLLM permits setuptools>=83 at runtime.
-        run: pip-audit --strict --desc --ignore-vuln PYSEC-2026-3447
+        # Every vLLM release up to and including 0.34.0 still requires
+        # setuptools<81, so the runtime environment cannot take these fixes:
+        #   - PYSEC-2026-3447 (alias GHSA-h35f-9h28-mq5c), fixed in 83.0.0:
+        #     MANIFEST.in matching when building sdists on macOS.
+        #   - GHSA-xmj3-9gf7-h52w, fixed in 84.1.0: path traversal in the
+        #     legacy Wheel.install_as_egg() path on Windows.
+        # Neither code path is used by ForgeAI at runtime (Linux, wheels are
+        # installed by pip, not setuptools). ForgeAI's isolated build backend
+        # is separately pinned to patched setuptools>=84.1.0. Remove these
+        # exceptions once vLLM permits setuptools>=84.1 at runtime.
+        run: >-
+          pip-audit --strict --desc
+          --ignore-vuln PYSEC-2026-3447
+          --ignore-vuln GHSA-xmj3-9gf7-h52w
 
   trivy:
     name: Trivy Filesystem and Config Scan

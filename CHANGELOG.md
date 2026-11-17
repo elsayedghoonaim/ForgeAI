@@ -32,6 +32,8 @@ CLI and API
 Packaging
 - The `gpu`, `vllm` and `all` extras are one `vllm` extra; `gpu` and `all` remain as aliases (`pip install ".[gpu]"` still works).
 - Development status classifier changed to Beta.
+- vLLM pin raised from 0.30.0 to 0.32.0 (base image `vllm/vllm-openai:v0.32.0`) to pick up fixes for 15 vLLM advisories, including PYSEC-2026-4344..4349, PYSEC-2026-4361/4362 and CVE-2026-114050. ForgeAI now refuses to start on vLLM 0.30.x/0.31.x.
+- Build backend requires `setuptools>=84.1.0` (GHSA-xmj3-9gf7-h52w).
 
 ### Removed (unused code)
 - `AdapterManager`, `VisionPipeline`, `forgeai.models.quantization` (`detect_quantization`), `select_resource_profile`, `CacheManager.garbage_collect_unreferenced`, `resolve_backend` (use `create_backend`).

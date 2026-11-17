@@ -27,8 +27,8 @@ def test_reject_gguf() -> None:
 
 
 def test_vllm_version_matches_ignores_local_metadata() -> None:
-    assert vllm_version_matches("0.30.0+cu128")
-    assert not vllm_version_matches("0.30.1")
+    assert vllm_version_matches("0.32.0+cu128")
+    assert not vllm_version_matches("0.32.1")
     assert not vllm_version_matches("garbage")
 
 
